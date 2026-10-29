@@ -227,7 +227,7 @@ export function DataListPage({
                   <th scope="col">数据内容</th>
                   <th scope="col">创建时间</th>
                   <th scope="col">标注结果</th>
-                  <th scope="col">打标时间</th>
+                  <th scope="col">标注时间</th>
                   <th scope="col">标注人</th>
                   <th scope="col">操作</th>
                 </tr>
@@ -390,7 +390,7 @@ export function DataDetailPage({
               <dd>{formatDate(item.inserted_at)}</dd>
             </div>
             <div>
-              <dt>打标时间</dt>
+              <dt>标注时间</dt>
               <dd>{formatDate(item.labeled_at)}</dd>
             </div>
           </dl>
