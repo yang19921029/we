@@ -14,6 +14,31 @@ export type User = {
   username: string
 }
 
+export type DataLabel = '正向' | '中性' | '负向'
+
+export type DataItem = {
+  id: string
+  content: string
+  fields: Record<string, unknown>
+  label: string | null
+  labeled_by: string | null
+  inserted_at: string | null
+  labeled_at: string | null
+}
+
+export type DataItemsPage = {
+  items: DataItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export type LabelStatusFilter =
+  | 'all'
+  | 'labeled'
+  | 'unlabeled'
+  | DataLabel
+
 type ApiResponse<T> = {
   code: number
   message: string
@@ -89,5 +114,41 @@ export async function getMenuSections(
         signal,
       }),
     })),
+  )
+}
+
+export function getDataItems(
+  page: number,
+  pageSize: number,
+  labelStatus: LabelStatusFilter,
+  signal?: AbortSignal,
+): Promise<DataItemsPage> {
+  const query = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+    label_status: labelStatus,
+  })
+  return request<DataItemsPage>(`/data-items?${query}`, { signal })
+}
+
+export function getDataItem(
+  itemId: string,
+  signal?: AbortSignal,
+): Promise<DataItem> {
+  return request<DataItem>(`/data-items/${encodeURIComponent(itemId)}`, {
+    signal,
+  })
+}
+
+export function saveDataItemLabel(
+  itemId: string,
+  label: DataLabel,
+): Promise<Pick<DataItem, 'id' | 'label' | 'labeled_by' | 'labeled_at'>> {
+  return request<Pick<DataItem, 'id' | 'label' | 'labeled_by' | 'labeled_at'>>(
+    `/data-items/${encodeURIComponent(itemId)}/label`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ label }),
+    },
   )
 }

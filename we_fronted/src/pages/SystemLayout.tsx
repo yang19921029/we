@@ -2,7 +2,22 @@ import { useEffect, useState } from 'react'
 import { ApiError, getMenuSections, type MenuSection } from '../api'
 import { normalizePath, navigateTo } from '../routing'
 import DashboardPage from './DashboardPage'
+import {
+  DataDetailPage,
+  DataLabelPage,
+  DataListPage,
+} from './DataItemsPages'
 import MenuFeaturePage from './MenuFeaturePage'
+
+function getDataItemId(route: string): string {
+  const encodedId = route.slice('/data/detail/'.length)
+  try {
+    return decodeURIComponent(encodedId)
+  } catch (error) {
+    if (!(error instanceof URIError)) throw error
+    return encodedId
+  }
+}
 
 function BrandMark() {
   return (
@@ -31,11 +46,16 @@ export default function SystemLayout({
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [logoutError, setLogoutError] = useState('')
 
+  const isDataDetailRoute = route.startsWith('/data/detail/')
   const routeMatch = menuSections
     .flatMap((section) =>
       section.items.map((item) => ({ section, item })),
     )
-    .find(({ item }) => normalizePath(item.path) === route)
+    .find(
+      ({ item }) =>
+        normalizePath(item.path) === route ||
+        (isDataDetailRoute && normalizePath(item.path) === '/data/list'),
+    )
   const parentMatch = menuSections.find(
     (section) => normalizePath(section.path) === route,
   )
@@ -94,7 +114,7 @@ export default function SystemLayout({
     <main className="system-shell">
       <header className="system-header">
         <a
-          aria-label="算法备案服务平台工作台"
+          aria-label="数据标注管理平台标注工作台"
           className="system-brand"
           href="#/dashboard"
           onClick={(event) => {
@@ -103,9 +123,9 @@ export default function SystemLayout({
           }}
         >
           <BrandMark />
-          <span className="system-brand-name">算法备案服务平台</span>
+          <span className="system-brand-name">数据标注管理平台</span>
           <span className="system-brand-divider" />
-          <span className="system-name">互联网信息服务算法备案系统</span>
+          <span className="system-name">数据标注系统</span>
         </a>
 
         <div className="header-tools">
@@ -168,7 +188,7 @@ export default function SystemLayout({
           <div className="sidebar-help">
             <span className="help-icon" aria-hidden="true">?</span>
             <span>需要帮助？</span>
-            <span className="help-detail">查看办事指南</span>
+            <span className="help-detail">查看标注规范</span>
           </div>
         </aside>
 
@@ -213,18 +233,33 @@ export default function SystemLayout({
                 <span>工作台</span>
                 <span className="breadcrumb-divider">/</span>
                 <span>{activeSection}</span>
-                {activeItem.name !== '工作台' && (
+                {activeItem.name !== '标注工作台' && (
                   <>
                     <span className="breadcrumb-divider">/</span>
                     <span className="breadcrumb-current">{activeItem.name}</span>
                   </>
                 )}
               </div>
-              {route === '/dashboard' || activeItem.name === '工作台' ? (
+              {route === '/dashboard' || activeItem.name === '标注工作台' ? (
                 <DashboardPage
                   onOpenMenu={selectMenuItem}
                   username={username}
                 />
+              ) : isDataDetailRoute ? (
+                <DataDetailPage
+                  itemId={getDataItemId(route)}
+                  key={route}
+                  onSessionExpired={onSessionExpired}
+                />
+              ) : route === '/data/list' ? (
+                <DataListPage
+                  onOpenDetails={(itemId) =>
+                    navigateTo(`/data/detail/${encodeURIComponent(itemId)}`)
+                  }
+                  onSessionExpired={onSessionExpired}
+                />
+              ) : route === '/data/label' ? (
+                <DataLabelPage onSessionExpired={onSessionExpired} />
               ) : (
                 <MenuFeaturePage section={selectedSection} item={activeItem} />
               )}

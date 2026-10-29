@@ -52,20 +52,20 @@ export default function LoginPage({
       <section className="brand-panel" aria-label="系统介绍">
         <div className="brand-topline">
           <BrandMark />
-          <span className="brand-label">算法备案服务平台</span>
+          <span className="brand-label">数据标注管理平台</span>
         </div>
 
         <div className="brand-copy">
           <p className="brand-eyebrow">ALGORITHM FILING SERVICE</p>
           <h1>
-            互联网信息服务
+            高质量数据
             <br />
-            算法备案系统
+            标注系统
           </h1>
           <p className="brand-description">
-            规范算法应用，促进互联网信息服务
+            管理标注任务与数据集，提升数据质量
             <br />
-            健康有序发展
+            让数据生产流程清晰、高效、可追溯
           </p>
         </div>
 
