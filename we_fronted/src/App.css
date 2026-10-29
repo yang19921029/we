@@ -1581,7 +1581,7 @@
   display: grid;
   grid-template-columns: minmax(210px, 0.8fr) minmax(0, 1.8fr);
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .annotation-queue,
@@ -1647,7 +1647,11 @@
 }
 
 .annotation-workspace {
+  position: sticky;
+  top: 50vh;
+  align-self: start;
   padding-bottom: 18px;
+  transform: translateY(-50%);
 }
 
 .annotation-content {
@@ -1968,6 +1972,11 @@
 
   .annotation-layout {
     grid-template-columns: 1fr;
+  }
+
+  .annotation-workspace {
+    position: static;
+    transform: none;
   }
 
   .data-detail-card dl {
