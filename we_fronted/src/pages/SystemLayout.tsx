@@ -7,6 +7,17 @@ import {
   DataLabelPage,
   DataListPage,
 } from './DataItemsPages'
+import {
+  DatasetManagementPage,
+  DataExportPage,
+  AuditLogPage,
+  LabelSchemaPage,
+  QualityReviewPage,
+  ProjectManagementPage,
+  StatisticsPage,
+  TaskManagementPage,
+  UserManagementPage,
+} from './PlatformPages'
 import MenuFeaturePage from './MenuFeaturePage'
 
 function getDataItemId(route: string): string {
@@ -33,11 +44,13 @@ export default function SystemLayout({
   onLogout,
   onSessionExpired,
   route,
+  role,
   username,
 }: {
   onLogout: () => Promise<void>
   onSessionExpired: () => void
   route: string
+  role: string
   username: string
 }) {
   const [menuSections, setMenuSections] = useState<MenuSection[]>([])
@@ -47,6 +60,7 @@ export default function SystemLayout({
   const [logoutError, setLogoutError] = useState('')
 
   const isDataDetailRoute = route.startsWith('/data/detail/')
+  const taskRouteMatch = /^\/data\/label\/(\d+)$/.exec(route)
   const routeMatch = menuSections
     .flatMap((section) =>
       section.items.map((item) => ({ section, item })),
@@ -54,7 +68,8 @@ export default function SystemLayout({
     .find(
       ({ item }) =>
         normalizePath(item.path) === route ||
-        (isDataDetailRoute && normalizePath(item.path) === '/data/list'),
+        (isDataDetailRoute && normalizePath(item.path) === '/data/list') ||
+        (taskRouteMatch && normalizePath(item.path) === '/data/label'),
     )
   const parentMatch = menuSections.find(
     (section) => normalizePath(section.path) === route,
@@ -259,7 +274,35 @@ export default function SystemLayout({
                   onSessionExpired={onSessionExpired}
                 />
               ) : route === '/data/label' ? (
-                <DataLabelPage onSessionExpired={onSessionExpired} />
+                <DataLabelPage key="annotation-all" onSessionExpired={onSessionExpired} />
+              ) : taskRouteMatch ? (
+                <DataLabelPage
+                  initialTaskId={Number(taskRouteMatch[1])}
+                  key={`annotation-task-${taskRouteMatch[1]}`}
+                  onSessionExpired={onSessionExpired}
+                />
+              ) : route === '/datasets' ? (
+                <DatasetManagementPage onSessionExpired={onSessionExpired} />
+              ) : route === '/projects' ? (
+                <ProjectManagementPage onSessionExpired={onSessionExpired} role={role} />
+              ) : route === '/tasks/list' || route === '/tasks/assign' ? (
+                <TaskManagementPage
+                  onOpenTask={(taskId) => navigateTo(`/data/label/${taskId}`)}
+                  onSessionExpired={onSessionExpired}
+                  username={username}
+                />
+              ) : route === '/labels' || route === '/labels/versions' ? (
+                <LabelSchemaPage onSessionExpired={onSessionExpired} />
+              ) : route.startsWith('/operations/') ? (
+                <QualityReviewPage onSessionExpired={onSessionExpired} />
+              ) : route === '/analytics' ? (
+                <StatisticsPage onSessionExpired={onSessionExpired} />
+              ) : route === '/data/export' ? (
+                <DataExportPage />
+              ) : route === '/users' ? (
+                <UserManagementPage onSessionExpired={onSessionExpired} />
+              ) : route === '/audit-logs' ? (
+                <AuditLogPage onSessionExpired={onSessionExpired} />
               ) : (
                 <MenuFeaturePage section={selectedSection} item={activeItem} />
               )}

@@ -12,6 +12,7 @@ function App() {
     () => getHashPath() !== LOGIN_PATH,
   )
   const [username, setUsername] = useState('')
+  const [userRole, setUserRole] = useState('')
   const [sessionError, setSessionError] = useState('')
   const [sessionAttempt, setSessionAttempt] = useState(0)
 
@@ -23,6 +24,7 @@ function App() {
         setIsLoggedIn(false)
         setIsCheckingSession(false)
         setUsername('')
+        setUserRole('')
         setSessionError('')
       } else if (!isLoggedIn) {
         setIsCheckingSession(true)
@@ -41,6 +43,7 @@ function App() {
     void getCurrentUser(controller.signal)
       .then((user) => {
         setUsername(user.username)
+        setUserRole(user.role ?? '')
         setIsLoggedIn(true)
         setIsCheckingSession(false)
       })
@@ -59,8 +62,9 @@ function App() {
     return () => controller.abort()
   }, [isLoggedIn, route, sessionAttempt])
 
-  const handleLogin = useCallback((nextUsername: string) => {
-    setUsername(nextUsername)
+  const handleLogin = useCallback((user: { username: string; role?: string }) => {
+    setUsername(user.username)
+    setUserRole(user.role ?? '')
     setSessionError('')
     setIsCheckingSession(true)
     setSessionAttempt((attempt) => attempt + 1)
@@ -91,6 +95,7 @@ function App() {
       onLogout={handleLogout}
       onSessionExpired={handleSessionExpired}
       route={normalizePath(route)}
+      role={userRole}
       username={username}
     />
   ) : (

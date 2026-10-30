@@ -1,5 +1,5 @@
 import { type FormEvent, useState } from 'react'
-import { login } from '../api'
+import { login, type User } from '../api'
 
 function BrandMark() {
   return (
@@ -15,7 +15,7 @@ export default function LoginPage({
   onLogin,
   initialNotice = '',
 }: {
-  onLogin: (username: string) => void
+  onLogin: (user: User) => void
   initialNotice?: string
 }) {
   const [passwordVisible, setPasswordVisible] = useState(false)
@@ -33,7 +33,7 @@ export default function LoginPage({
     setIsSubmitting(true)
     try {
       const user = await login(username, password)
-      onLogin(user.username)
+      onLogin(user)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '登录失败，请重试。')
       setIsNoticeError(true)

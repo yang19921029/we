@@ -4,9 +4,13 @@ React + TypeScript + Vite 前端，通过 Flask HTTP API 登录并加载菜单�
 
 登录页路由为 `#/login`，工作台路由为 `#/dashboard`。其他功能页面使用菜单接口返回的 `path` 作为路由，例如 `#/data/list`；数据详情页通过列表中的详情入口打开。一级、二级菜单、工作台快捷入口和浏览器前进/后退会共用这些路由。旧的 `#/home` 地址仍会指向工作台。
 
-页面按职责拆分在 `src/pages/`：`DashboardPage` 是工作台，`MenuFeaturePage` 承载独立菜单功能页，`SystemLayout` 负责公共导航和页面框架。
+页面按功能拆分在 `src/pages/`：`DashboardPage` 是工作台；`pages/platform/` 按数据集、项目、任务、标签、质检、统计、导出、用户和审计页面分别组织；`pages/data-items/` 分离数据列表、详情、标注工作台及多模态标注组件。原 `PlatformPages` 和 `DataItemsPages` 文件保留为导出入口，路由调用无需调整。共享页面组件和纯工具函数分别放在独立模块中。全局样式按登录页、系统框架、数据标注和管理页面拆分在 `src/styles/`，继续由 `App.css` 按原有顺序汇总。
 
-数据标注菜单包含“数据展示列表”和“数据打标”。列表从 `/api/data-items` 分页读取 Elastic 文档，并可按已标注、未标注或具体标注结果（正向、负向、中性）筛选，同时显示数据插入时间和打标时间；列表中的详情入口通过 `GET /api/data-items/<id>` 查看记录；打标页面通过单选项（正向、负向、中性）并调用 `PUT /api/data-items/<id>/label` 保存分类结果。数据队列展示数据内容。列表加载、详情加载和打标保存失败时都可以重试。
+一期功能包含组织 → 项目 → 数据集 → 任务管理、CSV/JSON/JSONL 导入、数据集筛选与搜索、任务创建/分配/进度跟踪、可版本化标签体系和按任务标注。标注工作台支持自动保存、撤销/重做、快捷键、跳过/暂停、规范查看和异常反馈；媒体数据可进行图像矩形框/多边形/关键点标注及音视频时间片段标注。标注结果、审核结果与业务配置的变更会保留操作记录。质量审核、用户角色、统计看板和 JSONL/CSV 导出使用后端数据，不使用静态示例指标。
+
+数据导入限制为每文件 10 MB、每次最多 5000 条；每个任务最多包含 10000 条数据；单次导出最多 10000 条。默认启用手机号、邮箱和身份证号脱敏，可通过后端 `MASK_SENSITIVE_DATA=false` 关闭（仅在确有权限依据时配置）。
+
+当前版本已覆盖 P0 核心流程、主要 P1 管理能力，以及基础自动质检、低置信度排序、按工作量分配和逾期任务 SLA 统计等 P2 能力。AI 预标注可通过后端配置接入 DeepSeek `deepseek-chat`，默认关闭；启用后只发送经默认 PII 脱敏的文本，建议需人工确认。项目成员隔离作用于项目下的数据集、任务、标注、审核、统计、质检与导入导出；超级管理员/项目管理员按已确认策略拥有跨项目权限。成本统计仍等待确定计费规则。
 
 ## 前后端联调
 
@@ -15,7 +19,7 @@ React + TypeScript + Vite 前端，通过 Flask HTTP API 登录并加载菜单�
 先在终端一启动后端（MySQL 连接配置见后端 README）：
 
 ```bash
-cd ../we_
+cd we_backed
 flask --app app init-db
 flask --app app init-admin
 flask --app app run --port 5000
@@ -24,6 +28,7 @@ flask --app app run --port 5000
 在终端二启动前端：
 
 ```bash
+cd we_fronted
 npm install
 npm run dev
 ```
