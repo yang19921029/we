@@ -27,9 +27,11 @@ MySQL 连接和会话密钥从项目根目录的 `.env` 读取。请勿提交或
 flask --app app init-admin
 ```
 
-升级代码后请重新运行 `flask --app app init-db`。该命令会幂等创建组织、项目、数据集、标签体系、任务、任务数据、审计日志等表，并为旧数据集补上默认项目归属、补齐默认菜单和旧用户表中的角色字段；已有用户保留原账号，角色默认为“项目管理员”。
+升级代码后请重新运行 `flask --app app init-db`。该命令会幂等创建组织、项目、数据集、标签体系、任务、任务数据、审计日志等表，并为旧数据集补上默认项目归属、补齐默认菜单和旧用户表中的角色/启用状态字段；已有用户保留原账号，角色默认为“项目管理员”，账号默认为启用状态。
 
-数据记录存放在 Elasticsearch，不再从 MySQL 的旧 `data_items` 表读取。设置 Elastic 连接后，运行 `flask --app app init-elastic` 可创建索引并写入示例数据；若索引已经存在，该命令不会覆盖或补写其中的数据。
+人员与权限页面支持创建账号、修改登录账号和角色、重置密码以及启用/禁用账号。禁用采用软禁用，不删除项目成员和历史记录；被禁用账号不能登录，已有会话在下次 API 请求时失效。禁用或降级管理员前，系统会保留至少一名启用的管理员。
+
+数据记录存放在 Elasticsearch，不再从 MySQL 的旧 `data_items` 表读取。设置 Elastic 连接后，运行 `flask --app app init-elastic` 可创建索引并写入示例数据；若索引已经存在，该命令只更新分页窗口和兼容字段映射，不会覆盖或补写其中的数据。
 
 可通过环境变量配置 Elastic（也可以在项目根目录的 `.env` 中设置）：
 
@@ -44,15 +46,27 @@ AI_BASE_URL=https://api.deepseek.com
 AI_MODEL=deepseek-chat
 AI_API_KEY=
 AI_TIMEOUT=30
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_SENDER=
+SMTP_USE_SSL=false
+SMTP_STARTTLS=true
+SMTP_TIMEOUT=10
 ```
 
 使用认证时必须同时设置用户名和密码。业务索引文档以 Elastic `_id` 作为数据编号，正文使用 `content` 或 `text` 字段。插入时间优先读取 `inserted_at`、`created_at`、`@timestamp` 或 `timestamp`，兼容历史数据时回退显示 `order_date`；打标时间读取 `labeled_at`，历史数据兼容回退 `updated_at`。新的打标操作会同时写入 `labeled_at` 和 `updated_at`。
 
+邮箱找回密码需要在后端配置 SMTP_HOST、SMTP_SENDER 和邮件服务凭据；支持 STARTTLS（默认）或 `SMTP_USE_SSL=true` 的 SSL 连接。用户登录后从顶部“账号安全”验证并绑定邮箱，只有已验证邮箱可用于找回；验证码有效 10 分钟，单次使用且每账号每项操作至少间隔 60 秒。未绑定邮箱的旧账号请由管理员通过“人员与权限”重置密码。SMTP 未配置时，验证码发送接口会明确返回服务不可用，不会更改邮箱或密码。
+
+顶部在线人数按最近 5 分钟内有心跳的启用账号去重统计；前端每分钟发送一次心跳，正常退出会立即移除当前会话，关闭浏览器或设备断网的会话会在 5 分钟后过期。
+
 AI 预标注默认关闭。启用 DeepSeek 前，在**后端**安全配置 `AI_ENABLED=true` 和 `AI_API_KEY`，不要把密钥写入前端、代码库或聊天。服务使用 OpenAI-compatible `POST /chat/completions`、`deepseek-chat` 和 JSON 输出；仅发送当前任务记录的文本（最多 12000 字符），默认先对手机号/邮箱/身份证号脱敏。用户点击“采用建议”前，模型结果只作为建议返回，不会自动写入标注。启用后该文本会发送至 `AI_BASE_URL` 指定的服务；当前 DeepSeek URL 是托管的外部服务，请按组织的数据处理/留存政策配置。仅 HTTPS 可连接外部地址；HTTP 只允许本机回环服务。
 
-数据响应默认启用敏感信息脱敏（手机号、邮箱、身份证号），可通过 `MASK_SENSITIVE_DATA=false` 关闭。仅 CSV、JSON 和 JSONL/NDJSON 文件可导入，每文件最多 10 MB、5000 条；单个任务最多分配 10000 条记录。导入的 Elastic 文档会写入 `dataset_id`，旧数据归入默认数据集。任务创建时会将数据 ID 快照写入 `task_items`，后续标注仅允许处理被分配到当前任务的记录。
+数据响应默认启用敏感信息脱敏（手机号、邮箱、身份证号），可通过 `MASK_SENSITIVE_DATA=false` 关闭。仅 CSV、JSON 和 JSONL/NDJSON 文件可导入，每文件最多 1 GB（1024 MB），记录条数不限；单条记录最多 50 MB。导入使用流式解析，后端临时磁盘及反向代理必须允许并容纳 1 GB 上传请求；若部署在 Nginx 等代理之后，应相应提高请求体上限和超时。单个任务最多分配 10000 条记录。导出使用 Elasticsearch 滚动分页，不限制匹配记录总数。导入的 Elastic 文档会写入 `dataset_id`，旧数据归入默认数据集。任务创建时会将数据 ID 快照写入 `task_items`，后续标注仅允许处理被分配到当前任务的记录。
 
-`init-db` 会创建默认组织、默认项目、“情感分类”标签体系及默认数据集。组织 → 项目 → 数据集 → 任务构成项目层级；旧数据集迁移到默认项目。标签体系支持 2 至 100 个唯一编码/名称和颜色配置；每次更新都会写入版本历史。账号角色包括“超级管理员、项目管理员、任务负责人、标注员、审核员、数据分析员”；用户管理和审核/统计/导出等敏感接口由后端校验角色。自动任务分配会选择当前活动任务量较低的标注员。统计从 Elastic 聚合实时计算，并从 MySQL 汇总截止时间已过且未完成/未暂停的任务作为逾期 SLA 指标；成本指标尚未启用，等待项目计费规则。审核结果、标注历史和多模态标注与文档一起保存在 Elastic，配置变更写入 MySQL 审计日志。
+`init-db` 会创建默认组织、默认项目、“情感分类”标签体系及默认数据集。组织 → 项目 → 数据集 → 任务构成项目层级；旧数据集迁移到默认项目。标签体系支持 2 至 100 个唯一编码/名称和颜色配置；每次更新都会写入版本历史。账号角色包括“超级管理员、项目管理员、任务负责人、标注员、审核员、数据分析员”；后端按角色返回菜单，首页快捷入口也只显示该角色可访问的菜单项；用户管理和审核/统计/导出等敏感接口仍由后端校验角色。自动任务分配会选择当前活动任务量较低的标注员。统计从 Elastic 聚合实时计算，并从 MySQL 汇总截止时间已过且未完成/未暂停的任务作为逾期 SLA 指标；成本指标尚未启用，等待项目计费规则。审核结果、标注历史和多模态标注与文档一起保存在 Elastic，配置变更写入 MySQL 审计日志。
 
 项目成员通过 `project_members` 关联表管理。超级管理员和项目管理员可跨项目访问并管理成员；其他角色必须先被加入项目，才可访问项目下的数据集、任务、标注、审核、统计、导入/导出等数据接口，组织列表也只显示其成员项目所属组织。任务负责人必须是对应项目成员；自动分配只会选择项目成员中的标注员。质量检查的重复内容查询限定在当前数据集。按照当前迁移选择，旧账号不会自动加入默认项目；升级后请用 `init-admin` 将指定的全局管理员设为超级管理员，再为其他用户配置最小角色并逐项目添加成员。此前版本已将旧用户角色默认迁移为“项目管理员”的账号仍具有全局权限，请在上线隔离策略前逐个检查并将非管理员账号降为合适角色。
 
@@ -78,6 +92,10 @@ AI 预标注默认关闭。启用 DeepSeek 前，在**后端**安全配置 `AI_E
 
 - `GET /api/auth/me`：校验会话并返回当前用户（需要登录）
 - `POST /api/logout`：清除当前会话
+- `POST /api/auth/change-password`：校验当前密码后修改密码（需要登录）
+- `POST /api/auth/presence`：更新当前会话心跳并返回在线账号数（需要登录）
+- `GET /api/auth/recovery-email`、`POST /api/auth/recovery-email/send-code`、`POST /api/auth/recovery-email/verify`：查看、发送验证码并绑定已验证的恢复邮箱（需要登录）
+- `POST /api/auth/forgot-password/send-code`、`POST /api/auth/forgot-password/reset`：向已验证邮箱发送验证码并重置密码（无需登录）
 
 ### 获取一级菜单
 
@@ -97,7 +115,7 @@ AI 预标注默认关闭。启用 DeepSeek 前，在**后端**安全配置 `AI_E
 - `POST /api/data-items/<id>/issues`：提交数据异常反馈
 - `GET /api/data-items/<id>/quality-check`：执行基础质量规则和当前数据集内的重复内容检查
 - `GET /api/reviews?status=pending|approved|returned`、`PUT /api/data-items/<id>/review`：审核已标注数据
-- `GET /api/data-items/export?format=jsonl|csv`：导出筛选后的数据
+- `GET /api/data-items/export?format=jsonl|csv`：通过 Elasticsearch 滚动分页导出筛选后的全部数据
 
 标注请求示例：
 

@@ -10,10 +10,14 @@ from flask import current_app
 from flask import jsonify
 from flask import request
 from flask import session
+import ijson
 from pymysql.err import IntegrityError
+from werkzeug.exceptions import RequestEntityTooLarge
 import csv
 import io
 import json
+import sqlite3
+import tempfile
 import uuid
 
 from app import (
@@ -25,6 +29,99 @@ from app import (
     user_can_access_project,
     write_audit_log,
 )
+
+
+MAX_IMPORT_FILE_BYTES = 1024 * 1024 * 1024
+MAX_IMPORT_RECORD_BYTES = 50 * 1024 * 1024
+MAX_IMPORT_REQUEST_OVERHEAD_BYTES = 1024 * 1024
+
+
+class DatasetImportError(ValueError):
+    def __init__(self, message, status_code=400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _iter_dataset_import_records(uploaded_file, filename):
+    stream = uploaded_file.stream
+    stream.seek(0)
+    if filename.endswith(".csv"):
+        text_stream = io.TextIOWrapper(stream, encoding="utf-8-sig", newline="")
+        try:
+            yield from csv.DictReader(text_stream)
+        finally:
+            text_stream.detach()
+        return
+    if filename.endswith((".jsonl", ".ndjson")):
+        first_line = True
+        while line := stream.readline(MAX_IMPORT_RECORD_BYTES + 1):
+            if len(line) > MAX_IMPORT_RECORD_BYTES:
+                raise DatasetImportError("单条记录不能超过 50 MB。", 413)
+            try:
+                decoded_line = line.decode("utf-8-sig" if first_line else "utf-8")
+            except UnicodeDecodeError:
+                raise
+            first_line = False
+            if decoded_line.strip():
+                yield json.loads(decoded_line)
+        return
+    if not filename.endswith(".json"):
+        raise ValueError("仅支持 CSV、JSON、JSONL 文件。")
+
+    stream.seek(0)
+    has_bom = stream.read(3) == b"\xef\xbb\xbf"
+    json_start = 3 if has_bom else 0
+    stream.seek(json_start)
+    first_content_byte = b""
+    while chunk := stream.read(64 * 1024):
+        non_whitespace = chunk.lstrip(b" \t\r\n")
+        if non_whitespace:
+            first_content_byte = non_whitespace[:1]
+            break
+    stream.seek(json_start)
+    if first_content_byte == b"[":
+        yield from ijson.items(stream, "item")
+        return
+    if first_content_byte == b"{":
+        found_items = False
+        for record in ijson.items(stream, "items.item"):
+            found_items = True
+            yield record
+        if found_items:
+            return
+
+    stream.seek(0)
+    stream_size = stream.seek(0, io.SEEK_END)
+    stream.seek(0)
+    if stream_size > MAX_IMPORT_RECORD_BYTES:
+        raise DatasetImportError("JSON 文件中的单条记录不能超过 50 MB。", 413)
+    text_stream = io.TextIOWrapper(stream, encoding="utf-8-sig")
+    try:
+        parsed = json.load(text_stream)
+    finally:
+        text_stream.detach()
+    records = parsed if isinstance(parsed, list) else (
+        parsed.get("items", [parsed]) if isinstance(parsed, dict) else parsed
+    )
+    if not isinstance(records, list):
+        raise DatasetImportError(
+            "JSON 文件必须是对象数组、包含 items 数组的对象或单个对象。"
+        )
+    yield from records
+
+
+def _validate_dataset_import_records(uploaded_file, filename):
+    record_count = 0
+    for record in _iter_dataset_import_records(uploaded_file, filename):
+        if not isinstance(record, dict):
+            raise DatasetImportError("文件中的每条记录都必须是 JSON 对象。")
+        record_size = len(json.dumps(record, ensure_ascii=False).encode("utf-8"))
+        if record_size > MAX_IMPORT_RECORD_BYTES:
+            raise DatasetImportError("单条记录不能超过 50 MB。", 413)
+        record_count += 1
+    if record_count == 0:
+        raise DatasetImportError("文件必须包含至少 1 条 JSON 对象记录。")
+    return record_count
 
 
 def register_project_routes(app):
@@ -175,7 +272,8 @@ def register_project_routes(app):
         with app_module.get_db().cursor() as cursor:
             cursor.execute(
                 """
-                SELECT u.id, u.username, u.role, pm.created_at, adder.username AS added_by
+                SELECT u.id, u.username, u.role, u.is_active,
+                    pm.created_at, adder.username AS added_by
                 FROM project_members pm
                 JOIN users u ON u.id = pm.user_id
                 JOIN users adder ON adder.id = pm.added_by
@@ -205,10 +303,15 @@ def register_project_routes(app):
                 cursor.execute("SELECT id FROM projects WHERE id = %s", (project_id,))
                 if cursor.fetchone() is None:
                     return jsonify(code=404, message="项目不存在。", data=None), 404
-                cursor.execute("SELECT id, username, role FROM users WHERE id = %s", (user_id,))
+                cursor.execute(
+                    "SELECT id, username, role, is_active FROM users WHERE id = %s",
+                    (user_id,),
+                )
                 user = cursor.fetchone()
                 if user is None:
                     return jsonify(code=404, message="用户不存在。", data=None), 404
+                if not user.get("is_active", 1):
+                    return jsonify(code=409, message="不能将已禁用账号添加为项目成员。", data=None), 409
                 cursor.execute(
                     """
                     INSERT INTO project_members (project_id, user_id, added_by)
@@ -343,47 +446,48 @@ def register_project_routes(app):
     def import_dataset_records(dataset_id: int):
         if not can_access_dataset(dataset_id):
             return jsonify(code=403, message="无权访问该数据集。", data=None), 403
-        uploaded_file = request.files.get("file")
+        request.max_content_length = (
+            MAX_IMPORT_FILE_BYTES + MAX_IMPORT_REQUEST_OVERHEAD_BYTES
+        )
+        try:
+            uploaded_file = request.files.get("file")
+        except RequestEntityTooLarge:
+            return jsonify(
+                code=413,
+                message="导入请求过大，单个文件上限为 1 GB（1024 MB）。",
+                data=None,
+            ), 413
         if uploaded_file is None or not uploaded_file.filename:
             return jsonify(code=400, message="请选择要导入的文件。", data=None), 400
         filename = uploaded_file.filename.lower()
-        try:
-            text = uploaded_file.read(10 * 1024 * 1024 + 1).decode("utf-8-sig")
-        except UnicodeDecodeError:
-            return jsonify(code=400, message="文件必须使用 UTF-8 编码。", data=None), 400
-        if len(text.encode("utf-8")) > 10 * 1024 * 1024:
-            return jsonify(code=413, message="单个导入文件不能超过 10 MB。", data=None), 413
-        try:
-            if filename.endswith(".csv"):
-                records = list(csv.DictReader(io.StringIO(text)))
-            elif filename.endswith((".jsonl", ".ndjson")):
-                records = [
-                    json.loads(line)
-                    for line in text.splitlines()
-                    if line.strip()
-                ]
-            elif filename.endswith(".json"):
-                parsed = json.loads(text)
-                records = parsed if isinstance(parsed, list) else parsed.get("items", [parsed])
-            else:
-                return jsonify(
-                    code=400,
-                    message="仅支持 CSV、JSON、JSONL 文件。",
-                    data=None,
-                ), 400
-        except (json.JSONDecodeError, csv.Error, AttributeError) as error:
-            return jsonify(code=400, message=f"文件格式错误：{error}", data=None), 400
-        if (
-            not isinstance(records, list)
-            or not records
-            or len(records) > 5000
-            or any(not isinstance(record, dict) for record in records)
-        ):
+        if not filename.endswith((".csv", ".json", ".jsonl", ".ndjson")):
             return jsonify(
                 code=400,
-                message="文件必须包含 1 到 5000 条 JSON 对象记录。",
+                message="仅支持 CSV、JSON、JSONL 文件。",
                 data=None,
             ), 400
+        try:
+            stream = uploaded_file.stream
+            stream.seek(0, io.SEEK_END)
+            file_size = stream.tell()
+            stream.seek(0)
+            if file_size > MAX_IMPORT_FILE_BYTES:
+                return jsonify(
+                    code=413,
+                    message="单个导入文件不能超过 1 GB（1024 MB）。",
+                    data=None,
+                ), 413
+            _validate_dataset_import_records(uploaded_file, filename)
+        except UnicodeDecodeError:
+            return jsonify(code=400, message="文件必须使用 UTF-8 编码。", data=None), 400
+        except DatasetImportError as error:
+            return jsonify(
+                code=error.status_code,
+                message=str(error),
+                data=None,
+            ), error.status_code
+        except (json.JSONDecodeError, ijson.JSONError, csv.Error, ValueError) as error:
+            return jsonify(code=400, message=f"文件格式错误：{error}", data=None), 400
 
         with app_module.get_db().cursor() as cursor:
             cursor.execute("SELECT id FROM datasets WHERE id = %s", (dataset_id,))
@@ -393,37 +497,46 @@ def register_project_routes(app):
 
         indexed = 0
         skipped_duplicates = 0
-        imported_ids = set()
-        try:
-            client = app_module.get_es_client()
-            for record in records:
-                external_id = record.get("_id", record.get("source_id"))
-                item_id = (
-                    f"ds-{dataset_id}-{external_id}"
-                    if isinstance(external_id, (str, int))
-                    and str(external_id).strip()
-                    and len(str(external_id)) <= 200
-                    else uuid.uuid4().hex
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dedupe_db = sqlite3.connect(f"{temp_dir}/import-ids.sqlite3")
+            try:
+                dedupe_db.execute(
+                    "CREATE TABLE imported_ids (id TEXT PRIMARY KEY)"
                 )
-                if item_id in imported_ids:
-                    skipped_duplicates += 1
-                    continue
-                imported_ids.add(item_id)
-                document = dict(record)
-                document.pop("_id", None)
-                document["dataset_id"] = dataset_id
-                document.setdefault(
-                    "inserted_at", datetime.now(timezone.utc).isoformat()
-                )
-                client.index(
-                    index=current_app.config["ELASTICSEARCH_INDEX"],
-                    id=item_id,
-                    document=document,
-                    refresh="wait_for",
-                )
-                indexed += 1
-        except (ApiError, TransportError, RuntimeError, ValueError) as error:
-            return elastic_error_response(error)
+                client = app_module.get_es_client()
+                for record in _iter_dataset_import_records(uploaded_file, filename):
+                    external_id = record.get("_id", record.get("source_id"))
+                    item_id = (
+                        f"ds-{dataset_id}-{external_id}"
+                        if isinstance(external_id, (str, int))
+                        and str(external_id).strip()
+                        and len(str(external_id)) <= 200
+                        else uuid.uuid4().hex
+                    )
+                    inserted = dedupe_db.execute(
+                        "INSERT OR IGNORE INTO imported_ids (id) VALUES (?)",
+                        (item_id,),
+                    )
+                    if inserted.rowcount == 0:
+                        skipped_duplicates += 1
+                        continue
+                    document = dict(record)
+                    document.pop("_id", None)
+                    document["dataset_id"] = dataset_id
+                    document.setdefault(
+                        "inserted_at", datetime.now(timezone.utc).isoformat()
+                    )
+                    client.index(
+                        index=current_app.config["ELASTICSEARCH_INDEX"],
+                        id=item_id,
+                        document=document,
+                        refresh="wait_for",
+                    )
+                    indexed += 1
+            except (ApiError, TransportError, RuntimeError, ValueError) as error:
+                return elastic_error_response(error)
+            finally:
+                dedupe_db.close()
 
         db = app_module.get_db()
         with db.cursor() as cursor:

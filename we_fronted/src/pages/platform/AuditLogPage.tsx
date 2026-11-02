@@ -5,6 +5,7 @@ import {
 } from '../../api'
 import { PageTitle } from './PlatformShared'
 import { handlePageError } from '../pageErrors'
+import { formatDate } from '../../dateFormat'
 
 export function AuditLogPage({
   onSessionExpired,
@@ -44,8 +45,8 @@ export function AuditLogPage({
       ) : logs.length === 0 ? (
         <p className="data-empty">暂无操作日志。</p>
       ) : (
-        <div className="data-table-wrap">
-          <table className="data-table">
+        <div className="data-table-wrap audit-log-table-wrap">
+          <table className="data-table audit-log-table">
             <thead>
               <tr>
                 <th scope="col">时间</th>
@@ -58,11 +59,11 @@ export function AuditLogPage({
             <tbody>
               {logs.map((log) => (
                 <tr key={log.id}>
-                  <td>{String(log.created_at).slice(0, 19)}</td>
-                  <td>{log.actor}</td>
-                  <td>{log.action}</td>
-                  <td>{log.entity_type} #{log.entity_id}</td>
-                  <td>{JSON.stringify(log.details)}</td>
+                  <td className="audit-log-date">{formatDate(log.created_at)}</td>
+                  <td className="audit-log-actor">{log.actor}</td>
+                  <td className="audit-log-action">{log.action}</td>
+                  <td className="audit-log-entity">{log.entity_type} #{log.entity_id}</td>
+                  <td className="audit-log-details">{JSON.stringify(log.details)}</td>
                 </tr>
               ))}
             </tbody>

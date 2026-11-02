@@ -19,6 +19,7 @@ export type PlatformUser = {
   id: number
   username: string
   role: string
+  is_active?: boolean
 }
 
 export type DataLabel = string
@@ -223,8 +224,64 @@ export function login(username: string, password: string): Promise<User> {
   })
 }
 
+export function changeCurrentPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<null> {
+  return request('/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  })
+}
+
+export function getRecoveryEmail(): Promise<{ email: string | null; verified: boolean }> {
+  return request('/auth/recovery-email')
+}
+
+export function sendRecoveryEmailCode(email: string): Promise<null> {
+  return request('/auth/recovery-email/send-code', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+}
+
+export function verifyRecoveryEmail(email: string, code: string): Promise<null> {
+  return request('/auth/recovery-email/verify', {
+    method: 'POST',
+    body: JSON.stringify({ email, code }),
+  })
+}
+
+export function sendForgotPasswordCode(username: string): Promise<null> {
+  return request('/auth/forgot-password/send-code', {
+    method: 'POST',
+    body: JSON.stringify({ username }),
+  })
+}
+
+export function resetForgottenPassword(
+  username: string,
+  code: string,
+  newPassword: string,
+): Promise<null> {
+  return request('/auth/forgot-password/reset', {
+    method: 'POST',
+    body: JSON.stringify({ username, code, new_password: newPassword }),
+  })
+}
+
 export function getCurrentUser(signal?: AbortSignal): Promise<User> {
   return request<User>('/auth/me', { signal })
+}
+
+export function updateOnlinePresence(): Promise<{
+  online_users: number
+  window_minutes: number
+}> {
+  return request('/auth/presence', { method: 'POST' })
 }
 
 export function logout(): Promise<null> {
@@ -477,6 +534,32 @@ export function getQualityCheck(
 
 export function getPlatformUsers(signal?: AbortSignal): Promise<PlatformUser[]> {
   return request('/users', { signal })
+}
+
+export function createPlatformUser(input: {
+  username: string
+  password: string
+  role: string
+}): Promise<PlatformUser> {
+  return request('/users', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export function updatePlatformUser(
+  userId: number,
+  changes: {
+    username?: string
+    role?: string
+    password?: string
+    is_active?: boolean
+  },
+): Promise<PlatformUser> {
+  return request(`/users/${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(changes),
+  })
 }
 
 export function updatePlatformUserRole(

@@ -1,5 +1,10 @@
-import { useEffect, useState } from 'react'
-import { ApiError, getMenuSections, type MenuSection } from '../api'
+import { useEffect, useRef, useState } from 'react'
+import {
+  ApiError,
+  getMenuSections,
+  updateOnlinePresence,
+  type MenuSection,
+} from '../api'
 import { normalizePath, navigateTo } from '../routing'
 import DashboardPage from './DashboardPage'
 import {
@@ -12,6 +17,7 @@ import {
   DataExportPage,
   AuditLogPage,
   LabelSchemaPage,
+  QualityManagementPage,
   QualityReviewPage,
   ProjectManagementPage,
   StatisticsPage,
@@ -19,6 +25,7 @@ import {
   UserManagementPage,
 } from './PlatformPages'
 import MenuFeaturePage from './MenuFeaturePage'
+import { AccountSecurityModal } from './platform/AccountSecurityModal'
 
 function getDataItemId(route: string): string {
   const encodedId = route.slice('/data/detail/'.length)
@@ -58,25 +65,95 @@ export default function SystemLayout({
   const [menuError, setMenuError] = useState('')
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [logoutError, setLogoutError] = useState('')
+  const [isAccountSecurityOpen, setIsAccountSecurityOpen] = useState(false)
+  const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false)
+  const [onlineUserCount, setOnlineUserCount] = useState<number | null>(null)
+  const [presenceError, setPresenceError] = useState('')
+  const accountMenuRef = useRef<HTMLDivElement>(null)
 
+  const canonicalRoute = route === '/tasks/assign'
+    ? '/tasks/list'
+    : route === '/operations/security'
+      ? '/operations/complaints'
+      : route
+  const visibleMenuSections = menuSections.map((section) => ({
+    ...section,
+    items: section.items.filter(
+      (item) =>
+        normalizePath(item.path) !== '/tasks/assign' &&
+        normalizePath(item.path) !== '/operations/security',
+    ),
+  }))
   const isDataDetailRoute = route.startsWith('/data/detail/')
   const taskRouteMatch = /^\/data\/label\/(\d+)$/.exec(route)
-  const routeMatch = menuSections
+  const routeMatch = visibleMenuSections
     .flatMap((section) =>
       section.items.map((item) => ({ section, item })),
     )
     .find(
       ({ item }) =>
-        normalizePath(item.path) === route ||
+        normalizePath(item.path) === canonicalRoute ||
         (isDataDetailRoute && normalizePath(item.path) === '/data/list') ||
         (taskRouteMatch && normalizePath(item.path) === '/data/label'),
     )
-  const parentMatch = menuSections.find(
-    (section) => normalizePath(section.path) === route,
+  const parentMatch = visibleMenuSections.find(
+    (section) => normalizePath(section.path) === canonicalRoute,
   )
   const selectedSection = routeMatch?.section ?? parentMatch
   const activeItem = routeMatch?.item ?? parentMatch?.items[0]
   const activeSection = selectedSection?.name ?? ''
+
+  useEffect(() => {
+    if (!isAccountMenuOpen) return
+
+    function handlePointerDown(event: PointerEvent) {
+      if (
+        event.target instanceof Node &&
+        !accountMenuRef.current?.contains(event.target)
+      ) {
+        setIsAccountMenuOpen(false)
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setIsAccountMenuOpen(false)
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isAccountMenuOpen])
+
+  useEffect(() => {
+    let active = true
+    async function refreshOnlineUsers() {
+      try {
+        const presence = await updateOnlinePresence()
+        if (active) {
+          setOnlineUserCount(presence.online_users)
+          setPresenceError('')
+        }
+      } catch (error) {
+        if (!active) return
+        if (error instanceof ApiError && error.status === 401) {
+          onSessionExpired()
+          return
+        }
+        setOnlineUserCount(null)
+        setPresenceError(error instanceof Error ? error.message : '在线人数获取失败。')
+      }
+    }
+
+    void refreshOnlineUsers()
+    const timer = window.setInterval(() => void refreshOnlineUsers(), 60_000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [onSessionExpired])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -103,11 +180,16 @@ export default function SystemLayout({
   }
 
   function selectSection(section: MenuSection) {
-    navigateTo(section.items[0]?.path ?? section.path)
+    const visibleItems = section.items.filter(
+      (item) =>
+        normalizePath(item.path) !== '/tasks/assign' &&
+        normalizePath(item.path) !== '/operations/security',
+    )
+    navigateTo(visibleItems[0]?.path ?? section.path)
   }
 
   function selectMenuItem(sectionLabel: string, itemLabel: string) {
-    const section = menuSections.find(
+    const section = visibleMenuSections.find(
       (menuSection) => menuSection.name === sectionLabel,
     )
     const item = section?.items.find(
@@ -144,13 +226,44 @@ export default function SystemLayout({
         </a>
 
         <div className="header-tools">
-          <span className="environment-tag">
-            <span className="demo-dot" />
-            已连接
-          </span>
-          <span className="header-separator" />
-          <span className="user-avatar">{username.slice(0, 1)}</span>
-          <span className="user-name">{username}</span>
+          <div className="account-menu" ref={accountMenuRef}>
+            <button
+              aria-expanded={isAccountMenuOpen}
+              aria-haspopup="menu"
+              aria-label={`账号菜单：${username}；当前在线用户 ${
+                onlineUserCount === null ? '暂不可用' : onlineUserCount
+              } 人；账号权限：${role || '未设置'}`}
+              className="account-menu-trigger"
+              onClick={() => setIsAccountMenuOpen((open) => !open)}
+              type="button"
+            >
+              <span
+                aria-hidden="true"
+                className="user-avatar online-user-count"
+                title={presenceError || '最近 5 分钟内有活动的去重账号数'}
+              >
+                {onlineUserCount ?? '—'}
+              </span>
+              <span className="user-name">{username}</span>
+              <span className="user-role">{role || '权限未设置'}</span>
+              <span aria-hidden="true" className="account-menu-chevron">▾</span>
+            </button>
+            {isAccountMenuOpen && (
+              <div className="account-menu-dropdown" id="account-menu-items" role="menu">
+                <button
+                  className="account-menu-item"
+                  onClick={() => {
+                    setIsAccountMenuOpen(false)
+                    setIsAccountSecurityOpen(true)
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  账号安全
+                </button>
+              </div>
+            )}
+          </div>
           <button className="logout-button" onClick={handleLogout} type="button">
             退出登录
           </button>
@@ -162,9 +275,12 @@ export default function SystemLayout({
           退出失败：{logoutError}
         </p>
       )}
+      {isAccountSecurityOpen && (
+        <AccountSecurityModal onClose={() => setIsAccountSecurityOpen(false)} />
+      )}
 
       <nav aria-label="一级菜单" className="primary-nav">
-        {menuSections.map((section) => (
+        {visibleMenuSections.map((section) => (
           <button
             aria-current={activeSection === section.name ? 'page' : undefined}
             className={`primary-nav-item${activeSection === section.name ? ' is-active' : ''}`}
@@ -257,6 +373,7 @@ export default function SystemLayout({
               </div>
               {route === '/dashboard' || activeItem.name === '标注工作台' ? (
                 <DashboardPage
+                  availableMenus={visibleMenuSections}
                   onOpenMenu={selectMenuItem}
                   username={username}
                 />
@@ -285,7 +402,7 @@ export default function SystemLayout({
                 <DatasetManagementPage onSessionExpired={onSessionExpired} />
               ) : route === '/projects' ? (
                 <ProjectManagementPage onSessionExpired={onSessionExpired} role={role} />
-              ) : route === '/tasks/list' || route === '/tasks/assign' ? (
+              ) : canonicalRoute === '/tasks/list' ? (
                 <TaskManagementPage
                   onOpenTask={(taskId) => navigateTo(`/data/label/${taskId}`)}
                   onSessionExpired={onSessionExpired}
@@ -293,8 +410,13 @@ export default function SystemLayout({
                 />
               ) : route === '/labels' || route === '/labels/versions' ? (
                 <LabelSchemaPage onSessionExpired={onSessionExpired} />
-              ) : route.startsWith('/operations/') ? (
+              ) : route === '/operations/reports' ? (
                 <QualityReviewPage onSessionExpired={onSessionExpired} />
+              ) : route === '/operations/security' || route === '/operations/complaints' ? (
+                <QualityManagementPage
+                  onSessionExpired={onSessionExpired}
+                  route={route}
+                />
               ) : route === '/analytics' ? (
                 <StatisticsPage onSessionExpired={onSessionExpired} />
               ) : route === '/data/export' ? (

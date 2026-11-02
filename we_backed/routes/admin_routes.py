@@ -12,6 +12,8 @@ from flask import jsonify
 from flask import request
 from flask import session
 import json
+from werkzeug.security import generate_password_hash
+from pymysql.err import IntegrityError
 
 from app import (
     accessible_dataset_ids,
@@ -26,6 +28,15 @@ from app import (
     write_audit_log,
 )
 
+USER_ROLES = {
+    "超级管理员",
+    "项目管理员",
+    "任务负责人",
+    "标注员",
+    "审核员",
+    "数据分析员",
+}
+
 
 def register_admin_routes(app):
     @app.get("/api/users")
@@ -34,55 +45,226 @@ def register_admin_routes(app):
     def list_users():
         with app_module.get_db().cursor() as cursor:
             cursor.execute(
-                "SELECT id, username, role FROM users ORDER BY username"
+                "SELECT id, username, role, is_active FROM users ORDER BY username"
             )
             rows = cursor.fetchall()
+        for row in rows:
+            row["is_active"] = bool(row.get("is_active", 1))
         return jsonify(code=0, message="ok", data=[dict(row) for row in rows])
+
+    @app.post("/api/users")
+    @login_required
+    @role_required("超级管理员", "项目管理员")
+    def create_user():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(code=400, message="请求体必须是 JSON 对象。", data=None), 400
+        username = payload.get("username")
+        password = payload.get("password")
+        role = payload.get("role", "标注员")
+        if (
+            not isinstance(username, str)
+            or not username.strip()
+            or len(username.strip()) > 191
+        ):
+            return jsonify(code=400, message="账号不能为空且不能超过 191 个字符。", data=None), 400
+        if not isinstance(password, str) or len(password) < 8:
+            return jsonify(code=400, message="初始密码至少需要 8 个字符。", data=None), 400
+        if not isinstance(role, str) or role not in USER_ROLES:
+            return jsonify(code=400, message="用户角色无效。", data=None), 400
+
+        db = app_module.get_db()
+        normalized_username = username.strip()
+        with db.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM users WHERE username = %s",
+                (normalized_username,),
+            )
+            if cursor.fetchone() is not None:
+                return jsonify(code=409, message="账号已存在。", data=None), 409
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO users (username, password_hash, role, is_active)
+                    VALUES (%s, %s, %s, 1)
+                    """,
+                    (
+                        normalized_username,
+                        generate_password_hash(password),
+                        role,
+                    ),
+                )
+            except IntegrityError:
+                return jsonify(code=409, message="账号已存在。", data=None), 409
+            user_id = cursor.lastrowid
+        write_audit_log(
+            "创建用户",
+            "用户",
+            user_id,
+            {"username": normalized_username, "role": role},
+        )
+        db.commit()
+        return jsonify(
+            code=0,
+            message="用户已创建。",
+            data={
+                "id": user_id,
+                "username": normalized_username,
+                "role": role,
+                "is_active": True,
+            },
+        ), 201
+
+    def save_user(user_id: int, payload):
+        if not isinstance(payload, dict):
+            return jsonify(code=400, message="请求体必须是 JSON 对象。", data=None), 400
+        allowed_fields = {"username", "role", "password", "is_active"}
+        if not payload or set(payload) - allowed_fields:
+            return jsonify(code=400, message="用户修改内容无效。", data=None), 400
+
+        db = app_module.get_db()
+        with db.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, username, role, is_active, password_hash
+                FROM users WHERE id = %s
+                """,
+                (user_id,),
+            )
+            user = cursor.fetchone()
+            if user is None:
+                return jsonify(code=404, message="用户不存在。", data=None), 404
+
+            username = user["username"]
+            if "username" in payload:
+                proposed_username = payload["username"]
+                if (
+                    not isinstance(proposed_username, str)
+                    or not proposed_username.strip()
+                    or len(proposed_username.strip()) > 191
+                ):
+                    return jsonify(code=400, message="账号不能为空且不能超过 191 个字符。", data=None), 400
+                username = proposed_username.strip()
+                if username != user["username"]:
+                    cursor.execute(
+                        "SELECT id FROM users WHERE username = %s AND id != %s",
+                        (username, user_id),
+                    )
+                    if cursor.fetchone() is not None:
+                        return jsonify(code=409, message="账号已存在。", data=None), 409
+
+            role = payload.get("role", user["role"])
+            if not isinstance(role, str) or role not in USER_ROLES:
+                return jsonify(code=400, message="用户角色无效。", data=None), 400
+
+            is_active = user.get("is_active", 1)
+            if "is_active" in payload:
+                if not isinstance(payload["is_active"], bool):
+                    return jsonify(code=400, message="账号状态必须是布尔值。", data=None), 400
+                is_active = payload["is_active"]
+
+            password = payload.get("password")
+            password_hash = user["password_hash"]
+            if password is not None:
+                if not isinstance(password, str) or len(password) < 8:
+                    return jsonify(code=400, message="新密码至少需要 8 个字符。", data=None), 400
+                password_hash = generate_password_hash(password)
+
+            changed_admin_status = (
+                user["role"] in {"超级管理员", "项目管理员"}
+                and (role not in {"超级管理员", "项目管理员"} or not is_active)
+            )
+            if changed_admin_status:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS total FROM users
+                    WHERE role IN ('超级管理员', '项目管理员') AND is_active = 1
+                    """
+                )
+                if cursor.fetchone()["total"] <= 1:
+                    return jsonify(
+                        code=409,
+                        message="至少需要保留一名启用状态的管理员。",
+                        data=None,
+                    ), 409
+            if session.get("user_id") == user_id and not is_active:
+                return jsonify(code=409, message="不能禁用当前登录账号。", data=None), 409
+
+            try:
+                cursor.execute(
+                    """
+                    UPDATE users
+                    SET username = %s, role = %s, password_hash = %s, is_active = %s,
+                        auth_version = auth_version + %s
+                    WHERE id = %s
+                    """,
+                    (
+                        username,
+                        role,
+                        password_hash,
+                        int(is_active),
+                        int(password is not None),
+                        user_id,
+                    ),
+                )
+            except IntegrityError:
+                return jsonify(code=409, message="账号已存在。", data=None), 409
+            if username != user["username"]:
+                cursor.execute(
+                    "UPDATE annotation_tasks SET assignee = %s WHERE assignee = %s",
+                    (username, user["username"]),
+                )
+            if session.get("user_id") == user_id and password is not None:
+                cursor.execute(
+                    """
+                    UPDATE active_sessions SET auth_version = auth_version + 1
+                    WHERE session_id = %s AND user_id = %s
+                    """,
+                    (session.get("session_id"), user_id),
+                )
+                cursor.execute(
+                    "UPDATE task_items SET assignee = %s WHERE assignee = %s",
+                    (username, user["username"]),
+                )
+
+        details = {
+            "username": username,
+            "role": role,
+            "is_active": bool(is_active),
+            "password_changed": password is not None,
+        }
+        write_audit_log("更新用户", "用户", user_id, details)
+        db.commit()
+        if session.get("user_id") == user_id:
+            session["username"] = username
+            session["role"] = role
+            if password is not None:
+                session["auth_version"] = session.get("auth_version", 0) + 1
+        return jsonify(
+            code=0,
+            message="用户信息已更新。",
+            data={
+                "id": user_id,
+                "username": username,
+                "role": role,
+                "is_active": bool(is_active),
+            },
+        )
+
+    @app.patch("/api/users/<int:user_id>")
+    @login_required
+    @role_required("超级管理员", "项目管理员")
+    def update_user(user_id: int):
+        return save_user(user_id, request.get_json(silent=True))
 
     @app.patch("/api/users/<int:user_id>/role")
     @login_required
     @role_required("超级管理员", "项目管理员")
     def update_user_role(user_id: int):
         payload = request.get_json(silent=True)
-        roles = {
-            "超级管理员",
-            "项目管理员",
-            "任务负责人",
-            "标注员",
-            "审核员",
-            "数据分析员",
-        }
-        role = payload.get("role") if isinstance(payload, dict) else None
-        if not isinstance(role, str) or role not in roles:
+        if not isinstance(payload, dict) or set(payload) != {"role"}:
             return jsonify(code=400, message="用户角色无效。", data=None), 400
-        db = app_module.get_db()
-        with db.cursor() as cursor:
-            cursor.execute("SELECT id, role FROM users WHERE id = %s", (user_id,))
-            user = cursor.fetchone()
-            if user is None:
-                return jsonify(code=404, message="用户不存在。", data=None), 404
-            if (
-                user["role"] in {"超级管理员", "项目管理员"}
-                and role not in {"超级管理员", "项目管理员"}
-            ):
-                cursor.execute(
-                    """
-                    SELECT COUNT(*) AS total FROM users
-                    WHERE role IN ('超级管理员', '项目管理员')
-                    """
-                )
-                if cursor.fetchone()["total"] <= 1:
-                    return jsonify(
-                        code=409,
-                        message="至少需要保留一名管理员。",
-                        data=None,
-                    ), 409
-            cursor.execute("UPDATE users SET role = %s WHERE id = %s", (role, user_id))
-        write_audit_log("更新角色", "用户", user_id, {"role": role})
-        db.commit()
-        if session.get("user_id") == user_id:
-            session["role"] = role
-        return jsonify(code=0, message="用户角色已更新。", data={"id": user_id, "role": role})
+        return save_user(user_id, payload)
 
     @app.get("/api/audit-logs")
     @login_required

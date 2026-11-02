@@ -14,6 +14,7 @@ import {
   type PlatformUser,
 } from '../../api'
 import { PageTitle } from './PlatformShared'
+import { PlatformModal } from './PlatformModal'
 import { handlePageError } from '../pageErrors'
 
 export function ProjectManagementPage({
@@ -38,6 +39,7 @@ export function ProjectManagementPage({
   const [status, setStatus] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [dialog, setDialog] = useState<'organization' | 'project' | 'member' | null>(null)
   const canManageProjects = role === '超级管理员' || role === '项目管理员'
 
   const loadProjects = useCallback(async () => {
@@ -90,6 +92,7 @@ export function ProjectManagementPage({
       setMemberUserId('')
       setStatus('项目成员已添加。')
       setMembers(await getProjectMembers(Number(selectedProjectId)))
+      setDialog(null)
     } catch (cause) {
       setError(handlePageError(cause, onSessionExpired, '添加项目成员失败。'))
     } finally {
@@ -119,6 +122,7 @@ export function ProjectManagementPage({
       setOrganizationName('')
       setOrganizationDescription('')
       setStatus('组织已创建。')
+      setDialog(null)
       await loadProjects()
     } catch (cause) {
       setError(handlePageError(cause, onSessionExpired, '组织创建失败。'))
@@ -141,6 +145,7 @@ export function ProjectManagementPage({
       setProjectName('')
       setProjectDescription('')
       setStatus('项目已创建。')
+      setDialog(null)
       await loadProjects()
     } catch (cause) {
       setError(handlePageError(cause, onSessionExpired, '项目创建失败。'))
@@ -156,42 +161,27 @@ export function ProjectManagementPage({
         title="组织与项目"
         description="按组织 → 项目 → 数据集 → 任务管理标注工作；项目归属会随数据集传递到任务。"
       />
-      {canManageProjects && <div className="platform-form-grid">
-        <form className="platform-form-card" onSubmit={(event) => void submitOrganization(event)}>
-          <h2>创建组织</h2>
-          <label>
-            组织名称
-            <input maxLength={191} onChange={(event) => setOrganizationName(event.target.value)} required value={organizationName} />
-          </label>
-          <label>
-            说明
-            <textarea maxLength={2000} onChange={(event) => setOrganizationDescription(event.target.value)} rows={3} value={organizationDescription} />
-          </label>
-          <button className="welcome-action" disabled={saving} type="submit">创建组织</button>
-        </form>
-        <form className="platform-form-card" onSubmit={(event) => void submitProject(event)}>
-          <h2>创建项目</h2>
-          <label>
-            所属组织
-            <select onChange={(event) => setOrganizationId(event.target.value)} required value={organizationId}>
-              {organizations.map((organization) => (
-                <option key={organization.id} value={organization.id}>{organization.name}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            项目名称
-            <input maxLength={191} onChange={(event) => setProjectName(event.target.value)} required value={projectName} />
-          </label>
-          <label>
-            说明
-            <textarea maxLength={2000} onChange={(event) => setProjectDescription(event.target.value)} rows={3} value={projectDescription} />
-          </label>
-          <button className="welcome-action" disabled={saving || organizations.length === 0} type="submit">创建项目</button>
-        </form>
-      </div>}
       {error && <p className="platform-error" role="alert">{error}</p>}
       {status && <p className="platform-success" role="status">{status}</p>}
+      {canManageProjects && (
+        <div className="platform-page-actions">
+          <button
+            className="welcome-action"
+            onClick={() => setDialog('organization')}
+            type="button"
+          >
+            创建组织
+          </button>
+          <button
+            className="welcome-action"
+            disabled={organizations.length === 0}
+            onClick={() => setDialog('project')}
+            type="button"
+          >
+            创建项目
+          </button>
+        </div>
+      )}
       <section className="platform-table-card">
         <div className="section-title-row">
           <div><h2>项目成员</h2><p>成员仅能访问已加入项目的数据集和任务。</p></div>
@@ -203,23 +193,24 @@ export function ProjectManagementPage({
               ))}
             </select>
           </label>
+          {canManageProjects && selectedProjectId && (
+            <button
+              className="welcome-action"
+              disabled={users.every(
+                (user) =>
+                  user.is_active === false ||
+                  members.some((member) => member.id === user.id),
+              )}
+              onClick={() => {
+                setMemberUserId('')
+                setDialog('member')
+              }}
+              type="button"
+            >
+              添加成员
+            </button>
+          )}
         </div>
-        {canManageProjects && selectedProjectId && (
-          <form className="platform-inline-form" onSubmit={(event) => void addMember(event)}>
-            <label>
-              添加用户
-              <select onChange={(event) => setMemberUserId(event.target.value)} required value={memberUserId}>
-                <option value="">选择用户</option>
-                {users
-                  .filter((user) => !members.some((member) => member.id === user.id))
-                  .map((user) => (
-                    <option key={user.id} value={user.id}>{user.username}（{user.role}）</option>
-                  ))}
-              </select>
-            </label>
-            <button className="welcome-action" disabled={saving || !memberUserId} type="submit">添加成员</button>
-          </form>
-        )}
         {members.length === 0 ? (
           <p className="data-empty">当前项目暂无显式成员。全局管理员仍可跨项目管理。</p>
         ) : (
@@ -270,6 +261,66 @@ export function ProjectManagementPage({
           </div>
         )}
       </section>
+      {dialog === 'organization' && (
+        <PlatformModal onClose={() => setDialog(null)} title="创建组织">
+          <form className="platform-form-card" onSubmit={(event) => void submitOrganization(event)}>
+            <label>
+              组织名称
+              <input maxLength={191} onChange={(event) => setOrganizationName(event.target.value)} required value={organizationName} />
+            </label>
+            <label>
+              说明
+              <textarea maxLength={2000} onChange={(event) => setOrganizationDescription(event.target.value)} rows={3} value={organizationDescription} />
+            </label>
+            {error && <p className="platform-error" role="alert">{error}</p>}
+            <button className="welcome-action" disabled={saving} type="submit">创建组织</button>
+          </form>
+        </PlatformModal>
+      )}
+      {dialog === 'project' && (
+        <PlatformModal onClose={() => setDialog(null)} title="创建项目">
+          <form className="platform-form-card" onSubmit={(event) => void submitProject(event)}>
+            <label>
+              所属组织
+              <select onChange={(event) => setOrganizationId(event.target.value)} required value={organizationId}>
+                {organizations.map((organization) => (
+                  <option key={organization.id} value={organization.id}>{organization.name}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              项目名称
+              <input maxLength={191} onChange={(event) => setProjectName(event.target.value)} required value={projectName} />
+            </label>
+            <label>
+              说明
+              <textarea maxLength={2000} onChange={(event) => setProjectDescription(event.target.value)} rows={3} value={projectDescription} />
+            </label>
+            {error && <p className="platform-error" role="alert">{error}</p>}
+            <button className="welcome-action" disabled={saving || organizations.length === 0} type="submit">创建项目</button>
+          </form>
+        </PlatformModal>
+      )}
+      {dialog === 'member' && (
+        <PlatformModal onClose={() => setDialog(null)} title="添加项目成员">
+          <form className="platform-form-card" onSubmit={(event) => void addMember(event)}>
+            <label>
+              用户
+              <select onChange={(event) => setMemberUserId(event.target.value)} required value={memberUserId}>
+                <option value="">选择用户</option>
+                {users
+                  .filter((user) => user.is_active !== false)
+                  .filter((user) => !members.some((member) => member.id === user.id))
+                  .map((user) => (
+                    <option key={user.id} value={user.id}>{user.username}（{user.role}）</option>
+                  ))}
+              </select>
+            </label>
+            {error && <p className="platform-error" role="alert">{error}</p>}
+            <button className="welcome-action" disabled={saving || !memberUserId} type="submit">添加成员</button>
+          </form>
+        </PlatformModal>
+      )}
     </>
   )
 }

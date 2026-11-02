@@ -88,16 +88,25 @@ def register_task_routes(app):
         if (
             not isinstance(dataset_id, int)
             or isinstance(dataset_id, bool)
-            or not isinstance(schema_id, int)
-            or isinstance(schema_id, bool)
-            or not isinstance(assignee, str)
-            or not assignee.strip()
-            or not isinstance(priority, str)
-            or priority not in {"高", "中", "低"}
-            or not isinstance(instructions, str)
-            or len(instructions) > 2000
+            or dataset_id < 1
         ):
-            return jsonify(code=400, message="任务配置无效。", data=None), 400
+            return jsonify(code=400, message="请选择有效的数据集。", data=None), 400
+        if (
+            not isinstance(schema_id, int)
+            or isinstance(schema_id, bool)
+            or schema_id < 1
+        ):
+            return jsonify(code=400, message="请选择有效的标签体系。", data=None), 400
+        if not isinstance(assignee, str) or not assignee.strip():
+            return jsonify(code=400, message="请选择有效的任务负责人。", data=None), 400
+        if not isinstance(priority, str) or priority not in {"高", "中", "低"}:
+            return jsonify(code=400, message="请选择有效的任务优先级。", data=None), 400
+        if not isinstance(instructions, str) or len(instructions) > 2000:
+            return jsonify(
+                code=400,
+                message="标注说明不能超过 2000 个字符。",
+                data=None,
+            ), 400
         if deadline is not None:
             if not isinstance(deadline, str):
                 return jsonify(code=400, message="截止时间格式无效。", data=None), 400
@@ -121,7 +130,8 @@ def register_task_routes(app):
                 SELECT u.id
                 FROM users u
                 JOIN project_members pm ON pm.user_id = u.id
-                WHERE u.username = %s AND pm.project_id = %s
+                WHERE u.username = %s AND u.is_active = 1
+                    AND pm.project_id = %s
                 """,
                 (assignee.strip(), dataset["project_id"]),
             )
@@ -242,7 +252,8 @@ def register_task_routes(app):
                     """
                     SELECT u.id FROM users u
                     JOIN project_members pm ON pm.user_id = u.id
-                    WHERE u.username = %s AND pm.project_id = %s
+                    WHERE u.username = %s AND u.is_active = 1
+                        AND pm.project_id = %s
                     """,
                     (assignee.strip(), task_scope["project_id"]),
                 )
@@ -312,7 +323,8 @@ def register_task_routes(app):
                 LEFT JOIN annotation_tasks t
                     ON t.assignee = u.username
                     AND t.status IN ('待分配', '待标注', '标注中', '已退回')
-                WHERE u.role = '标注员' AND pm.project_id = %s
+                WHERE u.role = '标注员' AND u.is_active = 1
+                    AND pm.project_id = %s
                 GROUP BY u.id, u.username
                 ORDER BY active_tasks, u.username
                 LIMIT 1

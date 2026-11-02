@@ -10,6 +10,7 @@ from flask import current_app
 from flask import jsonify
 from flask import request
 from flask import session
+from flask import stream_with_context
 import csv
 import io
 import json
@@ -74,57 +75,76 @@ def register_data_query_routes(app):
             else:
                 filters.append({"term": {"dataset_id": dataset_id}})
         query = {"bool": {"filter": filters}} if filters else {"match_all": {}}
+        client = None
         try:
-            response = app_module.get_es_client().search(
+            client = app_module.create_es_client()
+            response = client.search(
                 index=current_app.config["ELASTICSEARCH_INDEX"],
                 query=query,
-                from_=0,
-                size=10000,
-                track_total_hits=True,
+                size=1000,
+                scroll="2m",
+                sort="_doc",
             )
         except (ApiError, TransportError, RuntimeError, ValueError) as error:
+            if client is not None:
+                client.close()
             return elastic_error_response(error)
-        total = response["hits"]["total"]
-        if isinstance(total, dict):
-            total = total["value"]
-        if total > 10000:
-            return jsonify(
-                code=413,
-                message="单次导出最多 10000 条，请先按标注状态筛选。",
-                data=None,
-            ), 413
-        items = [get_data_item(hit) for hit in response["hits"]["hits"]]
-        if export_format == "jsonl":
-            content = "\n".join(
-                json.dumps(item, ensure_ascii=False) for item in items
-            )
-            mimetype = "application/x-ndjson; charset=utf-8"
-        else:
-            stream = io.StringIO(newline="")
-            writer = csv.DictWriter(
-                stream,
-                fieldnames=[
-                    "id",
-                    "content",
-                    "label",
-                    "labeled_by",
-                    "inserted_at",
-                    "labeled_at",
-                ],
-            )
-            writer.writeheader()
-            writer.writerows(
-                {
-                    key: item[key]
-                    for key in writer.fieldnames
-                }
-                for item in items
-            )
-            content = stream.getvalue()
-            mimetype = "text/csv; charset=utf-8"
+
+        fieldnames = [
+            "id",
+            "content",
+            "label",
+            "labeled_by",
+            "inserted_at",
+            "labeled_at",
+        ]
+
+        def generate_export():
+            nonlocal response
+            scroll_id = response.get("_scroll_id")
+            try:
+                if export_format == "csv":
+                    stream = io.StringIO(newline="")
+                    csv.DictWriter(stream, fieldnames=fieldnames).writeheader()
+                    yield stream.getvalue()
+
+                while True:
+                    hits = response["hits"]["hits"]
+                    if not hits:
+                        break
+                    for hit in hits:
+                        item = get_data_item(hit)
+                        if export_format == "jsonl":
+                            yield json.dumps(item, ensure_ascii=False) + "\n"
+                        else:
+                            stream = io.StringIO(newline="")
+                            csv.DictWriter(
+                                stream, fieldnames=fieldnames
+                            ).writerow({key: item[key] for key in fieldnames})
+                            yield stream.getvalue()
+
+                    if not scroll_id:
+                        break
+                    response = client.scroll(scroll_id=scroll_id, scroll="2m")
+                    scroll_id = response.get("_scroll_id", scroll_id)
+            finally:
+                try:
+                    if scroll_id:
+                        client.clear_scroll(scroll_id=scroll_id)
+                except (ApiError, TransportError, RuntimeError, ValueError):
+                    current_app.logger.warning(
+                        "Failed to clear Elasticsearch export scroll context."
+                    )
+                finally:
+                    client.close()
+
         return Response(
-            content,
-            mimetype=mimetype,
+            stream_with_context(generate_export()),
+            mimetype=(
+                "application/x-ndjson; charset=utf-8"
+                if export_format == "jsonl"
+                else "text/csv; charset=utf-8"
+            ),
             headers={
                 "Content-Disposition": f'attachment; filename="data-items.{export_format}"'
             },
@@ -297,9 +317,32 @@ def register_data_query_routes(app):
                 size=page_size,
                 track_total_hits=True,
                 sort=(
-                    [{"confidence": {"order": "asc", "missing": "_last"}}]
+                    [
+                        {
+                            "confidence": {
+                                "order": "asc",
+                                "missing": "_last",
+                                "unmapped_type": "float",
+                            }
+                        }
+                    ]
                     if sort_by == "uncertain"
-                    else [{"inserted_at": {"order": "desc", "missing": "_last"}}]
+                    else [
+                        {
+                            field: {
+                                "order": "desc",
+                                "missing": "_last",
+                                "unmapped_type": "date",
+                            }
+                        }
+                        for field in (
+                            "inserted_at",
+                            "created_at",
+                            "@timestamp",
+                            "timestamp",
+                            "order_date",
+                        )
+                    ]
                 ),
             )
         except (ApiError, TransportError, RuntimeError, ValueError) as error:

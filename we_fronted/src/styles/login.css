@@ -328,6 +328,23 @@
   font-size: 13px;
 }
 
+.forgot-code-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 14px;
+}
+
+.forgot-send-code {
+  margin-bottom: 10px;
+  white-space: nowrap;
+}
+
+.forgot-send-code:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .login-button {
   height: 48px;
   margin-top: 2px;
@@ -499,4 +516,3 @@
     padding-left: 18px;
   }
 }
-

@@ -23,7 +23,7 @@ export function DataExportPage() {
       <PageTitle
         eyebrow="DATA DELIVERY"
         title="数据导出"
-        description="按标注状态导出当前索引数据。单次最多导出 10000 条，文件包含标注人和时间字段。"
+        description="按数据集和标注状态导出匹配数据。大数据集将分页读取并流式生成文件，文件包含标注人和时间字段。"
       />
       <section className="platform-form-card platform-export-card">
         <label>

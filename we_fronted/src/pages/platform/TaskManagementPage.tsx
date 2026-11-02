@@ -13,7 +13,16 @@ import {
   type LabelSchema,
 } from '../../api'
 import { PageTitle } from './PlatformShared'
+import { PlatformModal } from './PlatformModal'
 import { handlePageError } from '../pageErrors'
+import { formatDate } from '../../dateFormat'
+
+type PendingTaskUpdate = {
+  task: AnnotationTask
+  field: 'assignee' | 'status'
+  previousValue: string
+  nextValue: string
+}
 
 export function TaskManagementPage({
   onSessionExpired,
@@ -39,6 +48,10 @@ export function TaskManagementPage({
   const [status, setStatus] = useState('')
   const [isSaving, setIsSaving] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
+  const [isCreateOpen, setIsCreateOpen] = useState(false)
+  const [pendingUpdate, setPendingUpdate] = useState<PendingTaskUpdate | null>(null)
+  const [isUpdatingTask, setIsUpdatingTask] = useState(false)
+  const [confirmError, setConfirmError] = useState('')
 
   const loadPageData = useCallback(async () => {
     setIsLoading(true)
@@ -86,14 +99,28 @@ export function TaskManagementPage({
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    const selectedDatasetId = Number(datasetId)
+    const selectedSchemaId = Number(schemaId)
+    if (!Number.isSafeInteger(selectedDatasetId) || selectedDatasetId < 1) {
+      setError('请选择有效的数据集。')
+      return
+    }
+    if (!Number.isSafeInteger(selectedSchemaId) || selectedSchemaId < 1) {
+      setError('请选择有效的标签体系。')
+      return
+    }
+    if (!assigneeMembers.some((member) => member.username === assignee)) {
+      setError('请选择当前项目中的有效负责人。')
+      return
+    }
     setIsSaving(true)
     setError('')
     setStatus('')
     try {
       await createAnnotationTask({
         name: name.trim(),
-        dataset_id: Number(datasetId),
-        label_schema_id: Number(schemaId),
+        dataset_id: selectedDatasetId,
+        label_schema_id: selectedSchemaId,
         assignee: assignee.trim(),
         priority,
         deadline,
@@ -101,6 +128,8 @@ export function TaskManagementPage({
       })
       setName('')
       setInstructions('')
+      setDeadline('')
+      setIsCreateOpen(false)
       setStatus('标注任务已创建。')
       await loadPageData()
     } catch (cause) {
@@ -110,17 +139,54 @@ export function TaskManagementPage({
     }
   }
 
-  async function changeStatus(task: AnnotationTask, nextStatus: string) {
-    setError('')
+  function changeStatus(task: AnnotationTask, nextStatus: string) {
+    if (task.status === nextStatus) return
+    setConfirmError('')
+    setPendingUpdate({
+      task,
+      field: 'status',
+      previousValue: task.status,
+      nextValue: nextStatus,
+    })
+  }
+
+  function changeAssignee(task: AnnotationTask, nextAssignee: string) {
+    if (task.assignee === nextAssignee) return
+    setConfirmError('')
+    setPendingUpdate({
+      task,
+      field: 'assignee',
+      previousValue: task.assignee,
+      nextValue: nextAssignee,
+    })
+  }
+
+  async function confirmTaskUpdate() {
+    if (!pendingUpdate || isUpdatingTask) return
+    setIsUpdatingTask(true)
+    setConfirmError('')
     try {
-      await updateAnnotationTask(task.id, { status: nextStatus })
+      await updateAnnotationTask(pendingUpdate.task.id, {
+        [pendingUpdate.field]: pendingUpdate.nextValue,
+      })
       setTasks((current) =>
         current.map((entry) =>
-          entry.id === task.id ? { ...entry, status: nextStatus } : entry,
+          entry.id === pendingUpdate.task.id
+            ? { ...entry, [pendingUpdate.field]: pendingUpdate.nextValue }
+            : entry,
         ),
       )
+      setPendingUpdate(null)
     } catch (cause) {
-      setError(handlePageError(cause, onSessionExpired, '任务状态更新失败。'))
+      setConfirmError(
+        handlePageError(
+          cause,
+          onSessionExpired,
+          pendingUpdate.field === 'status' ? '任务状态更新失败。' : '任务分配失败。',
+        ),
+      )
+    } finally {
+      setIsUpdatingTask(false)
     }
   }
 
@@ -140,20 +206,6 @@ export function TaskManagementPage({
     }
   }
 
-  async function changeAssignee(task: AnnotationTask, assignee: string) {
-    setError('')
-    try {
-      await updateAnnotationTask(task.id, { assignee })
-      setTasks((current) =>
-        current.map((entry) =>
-          entry.id === task.id ? { ...entry, assignee } : entry,
-        ),
-      )
-    } catch (cause) {
-      setError(handlePageError(cause, onSessionExpired, '任务分配失败。'))
-    }
-  }
-
   return (
     <>
       <PageTitle
@@ -161,60 +213,6 @@ export function TaskManagementPage({
         title="标注任务"
         description="选择数据集和标签规范创建任务，设置负责人、优先级及截止时间并跟踪任务状态。"
       />
-      <form className="platform-form-card task-create-form" onSubmit={(event) => void handleCreate(event)}>
-        <h2>创建任务</h2>
-        <div className="platform-form-grid">
-          <label>
-            任务名称
-            <input maxLength={191} onChange={(event) => setName(event.target.value)} required value={name} />
-          </label>
-          <label>
-            数据集
-            <select onChange={(event) => setDatasetId(event.target.value)} required value={datasetId}>
-              {datasets.map((dataset) => (
-                <option key={dataset.id} value={dataset.id}>
-                  {dataset.project_name} / {dataset.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            标签体系
-            <select onChange={(event) => setSchemaId(event.target.value)} required value={schemaId}>
-              {schemas.map((schema) => (
-                <option key={schema.id} value={schema.id}>{schema.name}（v{schema.version}）</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            负责人账号
-            <select onChange={(event) => setAssignee(event.target.value)} required value={assignee}>
-              {assigneeMembers.map((user) => (
-                <option key={user.id} value={user.username}>{user.username}（{user.role}）</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            优先级
-            <select onChange={(event) => setPriority(event.target.value as AnnotationTask['priority'])} value={priority}>
-              <option value="高">高</option>
-              <option value="中">中</option>
-              <option value="低">低</option>
-            </select>
-          </label>
-          <label>
-            截止时间
-            <input onChange={(event) => setDeadline(event.target.value)} type="datetime-local" value={deadline} />
-          </label>
-          <label className="platform-field-full">
-            标注说明
-            <textarea maxLength={2000} onChange={(event) => setInstructions(event.target.value)} rows={3} value={instructions} />
-          </label>
-        </div>
-        <button className="welcome-action" disabled={isSaving || datasets.length === 0 || schemas.length === 0 || assigneeMembers.length === 0} type="submit">
-          {isSaving ? '创建中…' : '创建任务'}
-        </button>
-      </form>
       {error && <p className="platform-error" role="alert">{error}</p>}
       {status && <p className="platform-success" role="status">{status}</p>}
       <section className="platform-table-card">
@@ -223,7 +221,20 @@ export function TaskManagementPage({
             <h2>任务列表</h2>
             <p>{tasks.length} 个任务</p>
           </div>
-          <button className="platform-secondary-button" onClick={() => void loadPageData()} type="button">刷新</button>
+          <div className="platform-page-actions">
+            <button className="platform-secondary-button" onClick={() => void loadPageData()} type="button">刷新</button>
+            <button
+              className="welcome-action"
+              disabled={datasets.length === 0 || schemas.length === 0}
+              onClick={() => {
+                setError('')
+                setIsCreateOpen(true)
+              }}
+              type="button"
+            >
+              创建任务
+            </button>
+          </div>
         </div>
         {isLoading ? (
           <p className="api-message" role="status">正在加载任务…</p>
@@ -257,6 +268,7 @@ export function TaskManagementPage({
                         return (
                       <select
                         aria-label={`${task.name}负责人`}
+                        className="platform-task-select platform-task-select-assignee"
                         onChange={(event) => void changeAssignee(task, event.target.value)}
                         value={task.assignee}
                       >
@@ -282,6 +294,7 @@ export function TaskManagementPage({
                     <td>
                       <select
                         aria-label={`${task.name}状态`}
+                        className="platform-task-select platform-task-select-status"
                         onChange={(event) => void changeStatus(task, event.target.value)}
                         value={task.status}
                       >
@@ -290,7 +303,7 @@ export function TaskManagementPage({
                         ))}
                       </select>
                     </td>
-                    <td>{task.deadline ? String(task.deadline).slice(0, 16) : '—'}</td>
+                    <td>{formatDate(task.deadline)}</td>
                     <td>
                       <button className="text-link" onClick={() => void autoAssign(task)} type="button">自动分配</button>
                       {task.assignee === username && (
@@ -307,6 +320,104 @@ export function TaskManagementPage({
           </div>
         )}
       </section>
+      {isCreateOpen && (
+        <PlatformModal onClose={() => setIsCreateOpen(false)} title="创建任务">
+          <form className="platform-form-card" onSubmit={(event) => void handleCreate(event)}>
+            <div className="platform-form-grid">
+              <label>
+                任务名称
+                <input maxLength={191} onChange={(event) => setName(event.target.value)} required value={name} />
+              </label>
+              <label>
+                数据集
+                <select onChange={(event) => setDatasetId(event.target.value)} required value={datasetId}>
+                  {datasets.map((dataset) => (
+                    <option key={dataset.id} value={dataset.id}>
+                      {dataset.project_name} / {dataset.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                标签体系
+                <select onChange={(event) => setSchemaId(event.target.value)} required value={schemaId}>
+                  {schemas.map((schema) => (
+                    <option key={schema.id} value={schema.id}>{schema.name}（v{schema.version}）</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                负责人账号
+                <select onChange={(event) => setAssignee(event.target.value)} required value={assignee}>
+                  {assigneeMembers.map((user) => (
+                    <option key={user.id} value={user.username}>{user.username}（{user.role}）</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                优先级
+                <select onChange={(event) => setPriority(event.target.value as AnnotationTask['priority'])} value={priority}>
+                  <option value="高">高</option>
+                  <option value="中">中</option>
+                  <option value="低">低</option>
+                </select>
+              </label>
+              <label>
+                截止时间
+                <input onChange={(event) => setDeadline(event.target.value)} type="datetime-local" value={deadline} />
+              </label>
+              <label className="platform-field-full">
+                标注说明
+                <textarea maxLength={2000} onChange={(event) => setInstructions(event.target.value)} rows={3} value={instructions} />
+              </label>
+            </div>
+            {error && <p className="platform-error" role="alert">{error}</p>}
+            <button className="welcome-action" disabled={isSaving || datasets.length === 0 || schemas.length === 0 || assigneeMembers.length === 0} type="submit">
+              {isSaving ? '创建中…' : '创建任务'}
+            </button>
+          </form>
+        </PlatformModal>
+      )}
+      {pendingUpdate && (
+        <PlatformModal
+          onClose={() => {
+            if (!isUpdatingTask) setPendingUpdate(null)
+          }}
+          title={pendingUpdate.field === 'status' ? '确认修改任务状态' : '确认更换任务负责人'}
+        >
+          <div className="platform-task-confirmation">
+            <p>
+              确认修改任务“{pendingUpdate.task.name}”的
+              {pendingUpdate.field === 'status' ? '状态' : '负责人'}吗？
+            </p>
+            <div className="platform-task-confirmation-change">
+              <span>{pendingUpdate.previousValue || '未设置'}</span>
+              <span aria-hidden="true">→</span>
+              <strong>{pendingUpdate.nextValue || '未设置'}</strong>
+            </div>
+            <p className="platform-form-hint">确认后将立即保存此修改。</p>
+            {confirmError && <p className="platform-error" role="alert">{confirmError}</p>}
+            <div className="platform-confirmation-actions">
+              <button
+                className="platform-secondary-button"
+                disabled={isUpdatingTask}
+                onClick={() => setPendingUpdate(null)}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="welcome-action"
+                disabled={isUpdatingTask}
+                onClick={() => void confirmTaskUpdate()}
+                type="button"
+              >
+                {isUpdatingTask ? '正在保存…' : '确认修改'}
+              </button>
+            </div>
+          </div>
+        </PlatformModal>
+      )}
     </>
   )
 }

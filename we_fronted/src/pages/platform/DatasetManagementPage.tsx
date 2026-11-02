@@ -8,7 +8,9 @@ import {
   type ProjectRecord,
 } from '../../api'
 import { PageTitle } from './PlatformShared'
+import { PlatformModal } from './PlatformModal'
 import { handlePageError } from '../pageErrors'
+import { formatDate } from '../../dateFormat'
 
 export function DatasetManagementPage({
   onSessionExpired,
@@ -26,6 +28,7 @@ export function DatasetManagementPage({
   const [status, setStatus] = useState('')
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
+  const [dialog, setDialog] = useState<'create' | 'import' | null>(null)
 
   const loadDatasets = useCallback(async () => {
     setIsLoading(true)
@@ -65,6 +68,7 @@ export function DatasetManagementPage({
       setName('')
       setDescription('')
       setStatus(`数据集「${dataset.name}」已创建。`)
+      setDialog(null)
     } catch (cause) {
       setError(handlePageError(cause, onSessionExpired, '数据集创建失败。'))
     } finally {
@@ -82,7 +86,7 @@ export function DatasetManagementPage({
       const result = await importDatasetFile(Number(datasetId), file)
       setStatus(`成功导入 ${result.imported_count} 条记录。`)
       setFile(null)
-      event.currentTarget.reset()
+      setDialog(null)
       await loadDatasets()
     } catch (cause) {
       setError(handlePageError(cause, onSessionExpired, '数据导入失败。'))
@@ -98,79 +102,6 @@ export function DatasetManagementPage({
         title="数据集管理"
         description="创建数据集并导入 CSV、JSON 或 JSONL 文件；导入记录将进入标注队列。"
       />
-      <div className="platform-form-grid">
-        <form className="platform-form-card" onSubmit={(event) => void handleCreate(event)}>
-          <h2>创建数据集</h2>
-          <label>
-            数据集名称
-            <input
-              maxLength={191}
-              onChange={(event) => setName(event.target.value)}
-              required
-              value={name}
-            />
-          </label>
-          <label>
-            所属项目
-            <select
-              onChange={(event) => setProjectId(event.target.value)}
-              required
-              value={projectId}
-            >
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.organization_name} / {project.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            说明
-            <textarea
-              maxLength={2000}
-              onChange={(event) => setDescription(event.target.value)}
-              rows={3}
-              value={description}
-            />
-          </label>
-          <button className="welcome-action" disabled={isSaving || projects.length === 0} type="submit">
-            创建数据集
-          </button>
-        </form>
-        <form className="platform-form-card" onSubmit={(event) => void handleImport(event)}>
-          <h2>导入数据</h2>
-          <label>
-            目标数据集
-            <select
-              onChange={(event) => setDatasetId(event.target.value)}
-              required
-              value={datasetId}
-            >
-              <option value="">请选择数据集</option>
-              {datasets.map((dataset) => (
-                <option key={dataset.id} value={dataset.id}>
-                  {dataset.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            文件（CSV / JSON / JSONL，最大 10 MB）
-            <input
-              accept=".csv,.json,.jsonl,.ndjson"
-              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-              required
-              type="file"
-            />
-          </label>
-          <p className="platform-form-hint">
-            JSON 支持对象数组或包含 items 数组的对象；每条记录应为 JSON 对象。
-          </p>
-          <button className="welcome-action" disabled={!file || isSaving} type="submit">
-            {isSaving ? '处理中…' : '开始导入'}
-          </button>
-        </form>
-      </div>
       {error && <p className="platform-error" role="alert">{error}</p>}
       {status && <p className="platform-success" role="status">{status}</p>}
       <section className="platform-table-card">
@@ -179,9 +110,33 @@ export function DatasetManagementPage({
             <h2>数据集</h2>
             <p>{datasets.length} 个数据集</p>
           </div>
-          <button className="platform-secondary-button" onClick={() => void loadDatasets()} type="button">
-            刷新
-          </button>
+          <div className="platform-page-actions">
+            <button className="platform-secondary-button" onClick={() => void loadDatasets()} type="button">
+              刷新
+            </button>
+            <button
+              className="platform-secondary-button"
+              onClick={() => {
+                setError('')
+                setDialog('import')
+              }}
+              type="button"
+            >
+              导入数据
+            </button>
+            <button
+              className="welcome-action"
+              onClick={() => {
+                setError('')
+                setName('')
+                setDescription('')
+                setDialog('create')
+              }}
+              type="button"
+            >
+              创建数据集
+            </button>
+          </div>
         </div>
         {isLoading ? (
           <p className="api-message" role="status">正在加载数据集…</p>
@@ -208,7 +163,7 @@ export function DatasetManagementPage({
                     <td>{dataset.description || '—'}</td>
                     <td>{dataset.record_count}</td>
                     <td>{dataset.created_by}</td>
-                    <td>{dataset.created_at ? String(dataset.created_at).slice(0, 10) : '—'}</td>
+                    <td>{formatDate(dataset.created_at)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -216,6 +171,85 @@ export function DatasetManagementPage({
           </div>
         )}
       </section>
+      {dialog === 'create' && (
+        <PlatformModal onClose={() => setDialog(null)} title="创建数据集">
+          <form className="platform-form-card" onSubmit={(event) => void handleCreate(event)}>
+            <label>
+              数据集名称
+              <input
+                maxLength={191}
+                onChange={(event) => setName(event.target.value)}
+                required
+                value={name}
+              />
+            </label>
+            <label>
+              所属项目
+              <select
+                onChange={(event) => setProjectId(event.target.value)}
+                required
+                value={projectId}
+              >
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.organization_name} / {project.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              说明
+              <textarea
+                maxLength={2000}
+                onChange={(event) => setDescription(event.target.value)}
+                rows={3}
+                value={description}
+              />
+            </label>
+            {error && <p className="platform-error" role="alert">{error}</p>}
+            <button className="welcome-action" disabled={isSaving || projects.length === 0} type="submit">
+              创建数据集
+            </button>
+          </form>
+        </PlatformModal>
+      )}
+      {dialog === 'import' && (
+        <PlatformModal onClose={() => setDialog(null)} title="导入数据">
+          <form className="platform-form-card" onSubmit={(event) => void handleImport(event)}>
+            <label>
+              目标数据集
+              <select
+                onChange={(event) => setDatasetId(event.target.value)}
+                required
+                value={datasetId}
+              >
+                <option value="">请选择数据集</option>
+                {datasets.map((dataset) => (
+                  <option key={dataset.id} value={dataset.id}>
+                    {dataset.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              文件（CSV / JSON / JSONL，最大 1 GB）
+              <input
+                accept=".csv,.json,.jsonl,.ndjson"
+                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                required
+                type="file"
+              />
+            </label>
+            <p className="platform-form-hint">
+              JSON 支持对象数组或包含 items 数组的对象；记录条数不限，每条记录最大 50 MB。大文件上传需要服务端及代理预留足够临时磁盘空间。
+            </p>
+            {error && <p className="platform-error" role="alert">{error}</p>}
+            <button className="welcome-action" disabled={!file || isSaving} type="submit">
+              {isSaving ? '处理中…' : '开始导入'}
+            </button>
+          </form>
+        </PlatformModal>
+      )}
     </>
   )
 }

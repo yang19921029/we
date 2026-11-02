@@ -1,10 +1,44 @@
+import type { MenuSection } from '../api'
+
 export default function DashboardPage({
+  availableMenus,
   onOpenMenu,
   username,
 }: {
+  availableMenus: MenuSection[]
   onOpenMenu: (section: string, item: string) => void
   username: string
 }) {
+  const canOpenMenu = (sectionName: string, itemName: string) =>
+    availableMenus.some(
+      (section) =>
+        section.name === sectionName &&
+        section.items.some((item) => item.name === itemName),
+    )
+  const quickServices = [
+    {
+      section: '数据标注',
+      item: '数据展示列表',
+      icon: '＋',
+      iconClass: 'filing-icon',
+      description: '浏览数据内容与当前标注结果',
+    },
+    {
+      section: '数据标注',
+      item: '数据打标',
+      icon: '⌕',
+      iconClass: 'query-icon',
+      description: '为数据内容选择分类并保存',
+    },
+    {
+      section: '质量管理',
+      item: '质检任务',
+      icon: '文',
+      iconClass: 'guide-icon',
+      description: '查看标注数据的质量检查任务',
+    },
+  ].filter(({ section, item }) => canOpenMenu(section, item))
+
   return (
     <>
       <div className="content-heading">
@@ -26,13 +60,15 @@ export default function DashboardPage({
           <span className="welcome-label">标注工作流</span>
           <h2>让数据标注更清晰、更高效</h2>
           <p>从数据集准备到任务执行与质量检查，在这里管理完整标注流程。</p>
-          <button
-            className="welcome-action"
-            onClick={() => onOpenMenu('数据标注', '数据打标')}
-            type="button"
-          >
-            开始打标 <span aria-hidden="true">→</span>
-          </button>
+          {canOpenMenu('数据标注', '数据打标') && (
+            <button
+              className="welcome-action"
+              onClick={() => onOpenMenu('数据标注', '数据打标')}
+              type="button"
+            >
+              开始打标 <span aria-hidden="true">→</span>
+            </button>
+          )}
         </div>
         <div aria-hidden="true" className="welcome-art">
           <div className="art-orbit art-orbit-one" />
@@ -56,42 +92,23 @@ export default function DashboardPage({
       </div>
 
       <div className="service-grid">
-        <button
-          className="service-card"
-          onClick={() => onOpenMenu('数据标注', '数据展示列表')}
-          type="button"
-        >
-          <span className="service-icon filing-icon" aria-hidden="true">＋</span>
-          <span className="service-card-copy">
-            <strong>数据展示列表</strong>
-            <small>浏览数据内容与当前标注结果</small>
-          </span>
-          <span className="service-arrow" aria-hidden="true">↗</span>
-        </button>
-        <button
-          className="service-card"
-          onClick={() => onOpenMenu('数据标注', '数据打标')}
-          type="button"
-        >
-          <span className="service-icon query-icon" aria-hidden="true">⌕</span>
-          <span className="service-card-copy">
-            <strong>数据打标</strong>
-            <small>为数据内容选择分类并保存</small>
-          </span>
-          <span className="service-arrow" aria-hidden="true">↗</span>
-        </button>
-        <button
-          className="service-card"
-          onClick={() => onOpenMenu('质量管理', '质检任务')}
-          type="button"
-        >
-          <span className="service-icon guide-icon" aria-hidden="true">文</span>
-          <span className="service-card-copy">
-            <strong>质检任务</strong>
-            <small>查看标注数据的质量检查任务</small>
-          </span>
-          <span className="service-arrow" aria-hidden="true">↗</span>
-        </button>
+        {quickServices.map((service) => (
+          <button
+            className="service-card"
+            key={service.item}
+            onClick={() => onOpenMenu(service.section, service.item)}
+            type="button"
+          >
+            <span className={`service-icon ${service.iconClass}`} aria-hidden="true">
+              {service.icon}
+            </span>
+            <span className="service-card-copy">
+              <strong>{service.item}</strong>
+              <small>{service.description}</small>
+            </span>
+            <span className="service-arrow" aria-hidden="true">↗</span>
+          </button>
+        ))}
       </div>
 
       <div className="dashboard-footer">

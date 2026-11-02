@@ -17,7 +17,8 @@ def init_db(get_db) -> None:
             CREATE TABLE IF NOT EXISTS users (
                 id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                 username VARCHAR(191) NOT NULL UNIQUE,
-                password_hash VARCHAR(255) NOT NULL
+                password_hash VARCHAR(255) NOT NULL,
+                is_active TINYINT(1) NOT NULL DEFAULT 1
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
             """
         )
@@ -33,6 +34,62 @@ def init_db(get_db) -> None:
             cursor.execute(
                 "ALTER TABLE users ALTER COLUMN role SET DEFAULT '标注员'"
             )
+        cursor.execute("SHOW COLUMNS FROM users LIKE 'is_active'")
+        if cursor.fetchone() is None:
+            cursor.execute(
+                """
+                ALTER TABLE users
+                ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1
+                """
+            )
+        cursor.execute("SHOW COLUMNS FROM users LIKE 'email'")
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN email VARCHAR(254) NULL"
+            )
+        cursor.execute("SHOW COLUMNS FROM users LIKE 'email_verified_at'")
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN email_verified_at DATETIME NULL"
+            )
+        cursor.execute("SHOW COLUMNS FROM users LIKE 'auth_version'")
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN auth_version INT NOT NULL DEFAULT 0"
+            )
+        cursor.execute("SHOW INDEX FROM users WHERE Key_name = 'uq_users_email'")
+        if cursor.fetchone() is None:
+            cursor.execute("ALTER TABLE users ADD UNIQUE KEY uq_users_email (email)")
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_verification_codes (
+                user_id INT NOT NULL,
+                purpose VARCHAR(24) NOT NULL,
+                email VARCHAR(254) NOT NULL,
+                code_hash CHAR(64) NOT NULL,
+                expires_at DATETIME NOT NULL,
+                attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, purpose),
+                CONSTRAINT fk_account_verification_codes_user
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS active_sessions (
+                session_id CHAR(64) NOT NULL PRIMARY KEY,
+                user_id INT NOT NULL,
+                auth_version INT NOT NULL DEFAULT 0,
+                last_seen_at DATETIME NOT NULL,
+                INDEX idx_active_sessions_last_seen (last_seen_at),
+                INDEX idx_active_sessions_user (user_id),
+                CONSTRAINT fk_active_sessions_user
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            """
+        )
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS menus (

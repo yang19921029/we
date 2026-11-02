@@ -42,23 +42,26 @@ def get_db():
         )
     return g.db
 
+def create_es_client() -> Elasticsearch:
+    username = current_app.config["ELASTICSEARCH_USERNAME"]
+    password = current_app.config["ELASTICSEARCH_PASSWORD"]
+    if bool(username) != bool(password):
+        raise RuntimeError(
+            "Elastic 用户名和密码必须同时配置或同时留空。"
+        )
+    options = {
+        "request_timeout": current_app.config["ELASTICSEARCH_TIMEOUT"],
+    }
+    if username and password:
+        options["basic_auth"] = (username, password)
+    return Elasticsearch(
+        current_app.config["ELASTICSEARCH_URL"],
+        **options,
+    )
+
 def get_es_client() -> Elasticsearch:
     if "es_client" not in g:
-        username = current_app.config["ELASTICSEARCH_USERNAME"]
-        password = current_app.config["ELASTICSEARCH_PASSWORD"]
-        if bool(username) != bool(password):
-            raise RuntimeError(
-                "Elastic 用户名和密码必须同时配置或同时留空。"
-            )
-        options = {
-            "request_timeout": current_app.config["ELASTICSEARCH_TIMEOUT"],
-        }
-        if username and password:
-            options["basic_auth"] = (username, password)
-        g.es_client = Elasticsearch(
-            current_app.config["ELASTICSEARCH_URL"],
-            **options,
-        )
+        g.es_client = create_es_client()
     return g.es_client
 
 def get_data_item(hit: dict) -> dict:
@@ -251,8 +254,32 @@ def init_db() -> None:
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if "user_id" not in session:
+        user_id = session.get("user_id")
+        session_id = session.get("session_id")
+        if user_id is None or not session_id:
             return jsonify(code=401, message="请先登录", data=None), 401
+        with get_db().cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT u.username, u.role, u.is_active, u.auth_version
+                FROM users u
+                JOIN active_sessions s ON s.user_id = u.id
+                    AND s.session_id = %s
+                    AND s.auth_version = u.auth_version
+                WHERE u.id = %s
+                """,
+                (session_id, user_id),
+            )
+            user = cursor.fetchone()
+        if user is None or not user.get("is_active", 1):
+            session.clear()
+            return jsonify(code=401, message="登录状态已失效或账号已禁用，请重新登录。", data=None), 401
+        if session.get("auth_version", 0) != user.get("auth_version", 0):
+            session.clear()
+            return jsonify(code=401, message="账号密码已变更，请重新登录。", data=None), 401
+        session["username"] = user["username"]
+        session["role"] = user.get("role", "项目管理员")
+        session["auth_version"] = user.get("auth_version", 0)
         return view(*args, **kwargs)
 
     return wrapped
@@ -485,6 +512,16 @@ def create_app(test_config: dict | None = None) -> Flask:
         AI_MODEL=os.environ.get("AI_MODEL", "deepseek-chat"),
         AI_API_KEY=os.environ.get("AI_API_KEY", ""),
         AI_TIMEOUT=float(os.environ.get("AI_TIMEOUT", "30")),
+        SMTP_HOST=os.environ.get("SMTP_HOST", ""),
+        SMTP_PORT=int(os.environ.get("SMTP_PORT", "587")),
+        SMTP_USERNAME=os.environ.get("SMTP_USERNAME", ""),
+        SMTP_PASSWORD=os.environ.get("SMTP_PASSWORD", ""),
+        SMTP_SENDER=os.environ.get("SMTP_SENDER", ""),
+        SMTP_USE_SSL=os.environ.get("SMTP_USE_SSL", "false").lower()
+        in {"1", "true", "yes", "on"},
+        SMTP_STARTTLS=os.environ.get("SMTP_STARTTLS", "true").lower()
+        in {"1", "true", "yes", "on"},
+        SMTP_TIMEOUT=float(os.environ.get("SMTP_TIMEOUT", "10")),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
     )
@@ -516,6 +553,12 @@ def create_app(test_config: dict | None = None) -> Flask:
         )
     if app.config["AI_TIMEOUT"] <= 0 or app.config["AI_TIMEOUT"] > 120:
         raise ValueError("AI_TIMEOUT 必须在 0 到 120 秒之间。")
+    if not 1 <= app.config["SMTP_PORT"] <= 65535:
+        raise ValueError("SMTP_PORT 必须在 1 到 65535 之间。")
+    if app.config["SMTP_TIMEOUT"] <= 0 or app.config["SMTP_TIMEOUT"] > 60:
+        raise ValueError("SMTP_TIMEOUT 必须在 0 到 60 秒之间。")
+    if bool(app.config["SMTP_USERNAME"]) != bool(app.config["SMTP_PASSWORD"]):
+        raise ValueError("SMTP_USERNAME 和 SMTP_PASSWORD 必须同时配置或同时留空。")
 
     @app.teardown_appcontext
     def close_db(_error=None):
@@ -544,8 +587,16 @@ def create_app(test_config: dict | None = None) -> Flask:
                 index=index_name,
                 settings={"index.max_result_window": 50000},
             )
+            client.indices.put_mapping(
+                index=index_name,
+                properties={
+                    "inserted_at": {"type": "date"},
+                    "created_at": {"type": "date"},
+                    "confidence": {"type": "float"},
+                },
+            )
             click.echo(
-                f"Elastic 索引 {index_name} 已存在，分页窗口已更新，数据未修改。"
+                f"Elastic 索引 {index_name} 已存在，分页窗口和兼容映射已更新，数据未修改。"
             )
             return
         client.indices.create(
@@ -560,6 +611,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                     "labeled_at": {"type": "date"},
                     "created_at": {"type": "date"},
                     "updated_at": {"type": "date"},
+                    "confidence": {"type": "float"},
                 }
             },
         )
@@ -593,7 +645,8 @@ def create_app(test_config: dict | None = None) -> Flask:
                 VALUES (%s, %s, '超级管理员')
                 ON DUPLICATE KEY UPDATE
                     password_hash = VALUES(password_hash),
-                    role = '超级管理员'
+                    role = '超级管理员',
+                    auth_version = auth_version + 1
                 """,
                 (username, generate_password_hash(password)),
             )

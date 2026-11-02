@@ -9,6 +9,7 @@ import {
   type LabelHistoryEntry,
   type MultimodalAnnotation,
 } from '../../api'
+export { formatDate } from '../../dateFormat'
 
 export const LABEL_OPTIONS: DataLabel[] = ['正向', '中性', '负向']
 
@@ -34,15 +35,6 @@ export function getLabelHistory(value: unknown): LabelHistoryEntry[] {
       'labeled_at' in entry &&
       typeof entry.labeled_at === 'string',
   )
-}
-
-export function formatDate(value: string | null): string {
-  if (!value) return '—'
-  const datePrefix = /^\d{4}-\d{2}-\d{2}/.exec(value)?.[0]
-  if (datePrefix) return datePrefix
-
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toISOString().slice(0, 10)
 }
 
 export function useDataItems(

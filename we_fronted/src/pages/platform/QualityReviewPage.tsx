@@ -122,7 +122,7 @@ export function QualityReviewPage({
                 value={notes[item.id] ?? ''}
               />
               {statusFilter === 'pending' && (
-                <div className="annotation-action-row">
+                <div className="platform-review-actions">
                   <button className="welcome-action" onClick={() => void decide(item.id, 'approved')} type="button">审核通过</button>
                   <button className="annotation-issue-toggle" disabled={!(notes[item.id] ?? '').trim()} onClick={() => void decide(item.id, 'returned')} type="button">退回修改</button>
                 </div>
