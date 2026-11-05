@@ -253,6 +253,7 @@ def init_db(get_db) -> None:
                 dataset_id INT NOT NULL,
                 label_schema_id INT NOT NULL,
                 assignee VARCHAR(191) NOT NULL,
+                second_assignee VARCHAR(191) NULL,
                 priority VARCHAR(16) NOT NULL DEFAULT '中',
                 status VARCHAR(32) NOT NULL DEFAULT '待分配',
                 deadline DATETIME NULL,
@@ -262,6 +263,7 @@ def init_db(get_db) -> None:
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                     ON UPDATE CURRENT_TIMESTAMP,
                 INDEX idx_tasks_status_assignee (status, assignee),
+                INDEX idx_tasks_second_assignee_status (second_assignee, status),
                 INDEX idx_tasks_created_id (created_at, id),
                 CONSTRAINT fk_tasks_dataset FOREIGN KEY (dataset_id)
                     REFERENCES datasets(id),
@@ -275,18 +277,64 @@ def init_db(get_db) -> None:
             cursor.execute(
                 "ALTER TABLE annotation_tasks ADD COLUMN dataset_version_id BIGINT NULL"
             )
+        cursor.execute("SHOW COLUMNS FROM annotation_tasks LIKE 'second_assignee'")
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "ALTER TABLE annotation_tasks ADD COLUMN second_assignee VARCHAR(191) NULL"
+            )
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS task_items (
                 task_id INT NOT NULL,
                 item_id VARCHAR(512) NOT NULL,
                 assignee VARCHAR(191) NOT NULL,
+                second_assignee VARCHAR(191) NULL,
                 status VARCHAR(32) NOT NULL DEFAULT '待标注',
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (task_id, item_id),
                 INDEX idx_task_items_task_status (task_id, status),
                 INDEX idx_task_items_assignee_status (assignee, status),
                 CONSTRAINT fk_task_items_task FOREIGN KEY (task_id)
+                    REFERENCES annotation_tasks(id) ON DELETE CASCADE
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            """
+        )
+        cursor.execute(
+            "SHOW COLUMNS FROM task_items LIKE 'second_assignee'"
+        )
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "ALTER TABLE task_items ADD COLUMN second_assignee VARCHAR(191) NULL"
+            )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_item_annotations (
+                task_id INT NOT NULL,
+                item_id VARCHAR(512) NOT NULL,
+                annotator VARCHAR(191) NOT NULL,
+                label VARCHAR(191) NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (task_id, item_id, annotator),
+                INDEX idx_task_item_annotations_item (task_id, item_id),
+                CONSTRAINT fk_task_item_annotations_task FOREIGN KEY (task_id)
+                    REFERENCES annotation_tasks(id) ON DELETE CASCADE
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_item_arbitrations (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                task_id INT NOT NULL,
+                item_id VARCHAR(512) NOT NULL,
+                label VARCHAR(191) NOT NULL,
+                adjudicator VARCHAR(191) NOT NULL,
+                note VARCHAR(1000) NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_task_item_arbitrations_item (task_id, item_id, created_at),
+                CONSTRAINT fk_task_item_arbitrations_task FOREIGN KEY (task_id)
                     REFERENCES annotation_tasks(id) ON DELETE CASCADE
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
             """
@@ -392,6 +440,13 @@ def init_db(get_db) -> None:
                 """
                 ALTER TABLE annotation_tasks
                 ADD INDEX idx_tasks_created_id (created_at, id)
+                """
+            )
+        if "idx_tasks_second_assignee_status" not in task_indexes:
+            cursor.execute(
+                """
+                ALTER TABLE annotation_tasks
+                ADD INDEX idx_tasks_second_assignee_status (second_assignee, status)
                 """
             )
         cursor.execute("SHOW INDEX FROM task_items")

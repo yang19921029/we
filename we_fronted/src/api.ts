@@ -148,6 +148,7 @@ export type AnnotationTask = {
   label_schema_name: string
   dataset_version: number | null
   assignee: string
+  second_assignee: string | null
   priority: '高' | '中' | '低'
   status: string
   deadline: string | null
@@ -237,6 +238,13 @@ export type QualityTrend = {
   approved: number
   returned: number
   total: number
+}
+
+export type AnnotationArbitrationItem = {
+  task_id: number
+  item_id: string
+  task_name: string
+  candidates: Array<{ annotator: string; label: string }>
 }
 
 export type AnnotationIssue = {
@@ -575,10 +583,11 @@ export function createAnnotationTask(input: {
   dataset_id: number
   label_schema_id: number
   assignee: string
+  second_assignee?: string | null
   priority: AnnotationTask['priority']
   deadline: string
   instructions: string
-}): Promise<Pick<AnnotationTask, 'id' | 'name' | 'dataset_id' | 'label_schema_id' | 'assignee' | 'priority' | 'status'>> {
+}): Promise<Pick<AnnotationTask, 'id' | 'name' | 'dataset_id' | 'label_schema_id' | 'assignee' | 'second_assignee' | 'priority' | 'status'>> {
   return request('/tasks', { method: 'POST', body: JSON.stringify(input) })
 }
 
@@ -757,6 +766,7 @@ export function saveDataItemLabel(
   labeled_at: string | null
   history_entry: LabelHistoryEntry | null
   annotation: MultimodalAnnotation | null
+  status?: string
 }> {
   const body: {
     label: DataLabel | null
@@ -810,6 +820,29 @@ export function getQualityTrends(
 ): Promise<QualityTrend[]> {
   const query = datasetId === undefined ? '' : `?dataset_id=${datasetId}`
   return request(`/quality-trends${query}`, { signal })
+}
+
+export function getAnnotationArbitrations(
+  signal?: AbortSignal,
+): Promise<{
+  items: AnnotationArbitrationItem[]
+  total: number
+  page: number
+  page_size: number
+}> {
+  return request('/arbitrations?page_size=100', { signal })
+}
+
+export function resolveAnnotationArbitration(
+  taskId: number,
+  itemId: string,
+  label: string,
+  note: string,
+): Promise<{ task_id: number; item_id: string; label: string }> {
+  return request(`/tasks/${taskId}/items/${encodeURIComponent(itemId)}/arbitrate`, {
+    method: 'POST',
+    body: JSON.stringify({ label, note }),
+  })
 }
 
 export function getAnnotationIssues(

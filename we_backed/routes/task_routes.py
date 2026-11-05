@@ -45,8 +45,10 @@ def register_task_routes(app):
             where_clauses = []
             params = []
             if session.get("role") == "标注员":
-                where_clauses.append("t.assignee = %s")
-                params.append(session["username"])
+                where_clauses.append(
+                    "(t.assignee = %s OR t.second_assignee = %s)"
+                )
+                params.extend([session["username"], session["username"]])
             if not is_global_project_admin():
                 where_clauses.append(
                     """
@@ -78,7 +80,7 @@ def register_task_routes(app):
                         t.label_schema_id, s.name AS label_schema_name,
                         (SELECT dv.version FROM dataset_versions dv
                          WHERE dv.id = t.dataset_version_id) AS dataset_version,
-                        t.assignee, t.priority, t.status, t.deadline,
+                        t.assignee, t.second_assignee, t.priority, t.status, t.deadline,
                         t.instructions, t.created_by, t.created_at,
                         (SELECT COUNT(*) FROM task_items i WHERE i.task_id = t.id)
                             AS total_items,
@@ -104,7 +106,7 @@ def register_task_routes(app):
                         t.label_schema_id, s.name AS label_schema_name,
                         (SELECT dv.version FROM dataset_versions dv
                          WHERE dv.id = t.dataset_version_id) AS dataset_version,
-                        t.assignee, t.priority, t.status, t.deadline,
+                        t.assignee, t.second_assignee, t.priority, t.status, t.deadline,
                         t.instructions, t.created_by, t.created_at,
                         COUNT(i.item_id) AS total_items,
                         SUM(CASE WHEN i.status IN ('已标注', '已审核')
@@ -117,7 +119,8 @@ def register_task_routes(app):
                     LEFT JOIN task_items i ON i.task_id = t.id
                     {where_clause}
                     GROUP BY t.id, t.name, t.dataset_id, d.name, d.project_id,
-                        p.name, t.label_schema_id, s.name, t.assignee, t.priority,
+                        p.name, t.label_schema_id, s.name, t.assignee,
+                        t.second_assignee, t.priority,
                         t.status, t.deadline, t.instructions, t.created_by,
                         t.created_at
                     ORDER BY t.created_at DESC, t.id DESC
@@ -149,6 +152,9 @@ def register_task_routes(app):
         dataset_id = payload.get("dataset_id")
         schema_id = payload.get("label_schema_id")
         assignee = payload.get("assignee", session["username"])
+        second_assignee = payload.get("second_assignee")
+        if second_assignee == "":
+            second_assignee = None
         priority = payload.get("priority", "中")
         instructions = payload.get("instructions", "")
         deadline = payload.get("deadline") or None
@@ -168,6 +174,14 @@ def register_task_routes(app):
             return jsonify(code=400, message="请选择有效的标签体系。", data=None), 400
         if not isinstance(assignee, str) or not assignee.strip():
             return jsonify(code=400, message="请选择有效的任务负责人。", data=None), 400
+        if second_assignee is not None and (
+            not isinstance(second_assignee, str)
+            or not second_assignee.strip()
+            or len(second_assignee.strip()) > 191
+        ):
+            return jsonify(code=400, message="第二位标注员账号无效。", data=None), 400
+        if second_assignee is not None and second_assignee.strip() == assignee.strip():
+            return jsonify(code=400, message="两位标注员必须是不同账号。", data=None), 400
         if not isinstance(priority, str) or priority not in {"高", "中", "低"}:
             return jsonify(code=400, message="请选择有效的任务优先级。", data=None), 400
         if not isinstance(instructions, str) or len(instructions) > 2000:
@@ -204,7 +218,7 @@ def register_task_routes(app):
             dataset_version = cursor.fetchone()
             cursor.execute(
                 """
-                SELECT u.id
+                SELECT u.id, u.role
                 FROM users u
                 JOIN project_members pm ON pm.user_id = u.id
                 WHERE u.username = %s AND u.is_active = 1
@@ -212,8 +226,31 @@ def register_task_routes(app):
                 """,
                 (assignee.strip(), dataset["project_id"]),
             )
-            if cursor.fetchone() is None:
+            primary_member = cursor.fetchone()
+            if primary_member is None:
                 return jsonify(code=400, message="负责人必须是该项目成员。", data=None), 400
+            if second_assignee is not None:
+                if primary_member.get("role") != "标注员":
+                    return jsonify(
+                        code=400,
+                        message="双人标注的两位负责人都必须是标注员。",
+                        data=None,
+                    ), 400
+                cursor.execute(
+                    """
+                    SELECT u.id FROM users u
+                    JOIN project_members pm ON pm.user_id = u.id
+                    WHERE u.username = %s AND u.is_active = 1
+                        AND pm.project_id = %s AND u.role = '标注员'
+                    """,
+                    (second_assignee.strip(), dataset["project_id"]),
+                )
+                if cursor.fetchone() is None:
+                    return jsonify(
+                        code=400,
+                        message="第二位标注员必须是该项目成员。",
+                        data=None,
+                    ), 400
         try:
             search_query = (
                 {
@@ -256,15 +293,17 @@ def register_task_routes(app):
             cursor.execute(
                 """
                 INSERT INTO annotation_tasks
-                    (name, dataset_id, label_schema_id, assignee, priority,
-                     status, deadline, instructions, created_by, dataset_version_id)
-                VALUES (%s, %s, %s, %s, %s, '待标注', %s, %s, %s, %s)
+                    (name, dataset_id, label_schema_id, assignee, second_assignee,
+                     priority, status, deadline, instructions, created_by,
+                     dataset_version_id)
+                VALUES (%s, %s, %s, %s, %s, %s, '待标注', %s, %s, %s, %s)
                 """,
                 (
                     name.strip(),
                     dataset_id,
                     schema_id,
                     assignee.strip(),
+                    second_assignee.strip() if second_assignee else None,
                     priority,
                     deadline,
                     instructions.strip(),
@@ -275,11 +314,17 @@ def register_task_routes(app):
             task_id = cursor.lastrowid
             cursor.executemany(
                 """
-                INSERT INTO task_items (task_id, item_id, assignee, status)
-                VALUES (%s, %s, %s, '待标注')
+                INSERT INTO task_items
+                    (task_id, item_id, assignee, second_assignee, status)
+                VALUES (%s, %s, %s, %s, '待标注')
                 """,
                 [
-                    (task_id, str(hit["_id"]), assignee.strip())
+                    (
+                        task_id,
+                        str(hit["_id"]),
+                        assignee.strip(),
+                        second_assignee.strip() if second_assignee else None,
+                    )
                     for hit in task_hits["hits"]
                 ],
             )
@@ -292,6 +337,14 @@ def register_task_routes(app):
                 f"任务“{name.strip()}”已分配给你。",
                 f"/data/label/{task_id}",
             )
+            if second_assignee:
+                add_notification(
+                    cursor,
+                    second_assignee.strip(),
+                    "已分配双人标注任务",
+                    f"任务“{name.strip()}”已分配给你，请独立完成标注。",
+                    f"/data/label/{task_id}",
+                )
         db.commit()
         return jsonify(
             code=0,
@@ -302,6 +355,7 @@ def register_task_routes(app):
                 "dataset_id": dataset_id,
                 "label_schema_id": schema_id,
                 "assignee": assignee.strip(),
+                "second_assignee": second_assignee.strip() if second_assignee else None,
                 "priority": priority,
                 "status": "待标注",
                 "dataset_version": dataset_version["version"] if dataset_version else None,
@@ -320,7 +374,7 @@ def register_task_routes(app):
         with app_module.get_db().cursor() as cursor:
             cursor.execute(
                 """
-                SELECT t.status, d.project_id FROM annotation_tasks t
+                SELECT t.status, t.second_assignee, d.project_id FROM annotation_tasks t
                 JOIN datasets d ON d.id = t.dataset_id WHERE t.id = %s
                 """,
                 (task_id,),
@@ -334,6 +388,12 @@ def register_task_routes(app):
             assignee = payload["assignee"]
             if not isinstance(assignee, str) or not assignee.strip():
                 return jsonify(code=400, message="负责人不能为空。", data=None), 400
+            if assignee.strip() == task_scope.get("second_assignee"):
+                return jsonify(
+                    code=400,
+                    message="两位标注员必须是不同账号。",
+                    data=None,
+                ), 400
             with app_module.get_db().cursor() as cursor:
                 cursor.execute(
                     """
@@ -427,7 +487,7 @@ def register_task_routes(app):
             for task_id in task_ids:
                 cursor.execute(
                     """
-                    SELECT t.id, t.name, d.project_id
+                    SELECT t.id, t.name, t.second_assignee, d.project_id
                     FROM annotation_tasks t
                     JOIN datasets d ON d.id = t.dataset_id
                     WHERE t.id = %s
@@ -439,6 +499,12 @@ def register_task_routes(app):
                     return jsonify(code=404, message=f"任务 {task_id} 不存在。", data=None), 404
                 if not user_can_access_project(task["project_id"]):
                     return jsonify(code=403, message="所选任务中包含无权访问的项目。", data=None), 403
+                if assignee.strip() == task.get("second_assignee"):
+                    return jsonify(
+                        code=400,
+                        message=f"负责人不能与任务 {task_id} 的第二位标注员相同。",
+                        data=None,
+                    ), 400
                 cursor.execute(
                     """
                     SELECT u.id FROM users u
@@ -490,7 +556,7 @@ def register_task_routes(app):
         with db.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT t.id, d.project_id FROM annotation_tasks t
+                SELECT t.id, t.second_assignee, d.project_id FROM annotation_tasks t
                 JOIN datasets d ON d.id = t.dataset_id WHERE t.id = %s
                 """,
                 (task_id,),
@@ -515,11 +581,17 @@ def register_task_routes(app):
                 ) assigned_items ON assigned_items.assignee = u.username
                 WHERE u.role = '标注员' AND u.is_active = 1
                     AND pm.project_id = %s
+                    AND (%s IS NULL OR u.username != %s)
                 GROUP BY u.id, u.username
                 ORDER BY active_items, u.username
                 LIMIT 1
                 """,
-                (task_id, task["project_id"]),
+                (
+                    task_id,
+                    task["project_id"],
+                    task.get("second_assignee"),
+                    task.get("second_assignee"),
+                ),
             )
             annotator = cursor.fetchone()
             if annotator is None:
@@ -567,7 +639,8 @@ def register_task_routes(app):
         with db.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT i.assignee, t.status AS task_status, d.project_id
+                SELECT i.assignee, i.second_assignee,
+                    t.status AS task_status, d.project_id
                 FROM task_items i
                 JOIN annotation_tasks t ON t.id = i.task_id
                 JOIN datasets d ON d.id = t.dataset_id
@@ -580,8 +653,17 @@ def register_task_routes(app):
                 return jsonify(code=404, message="任务数据不存在。", data=None), 404
             if not user_can_access_project(task_item["project_id"]):
                 return jsonify(code=403, message="无权访问该项目任务。", data=None), 403
-            if task_item["assignee"] != session["username"]:
+            if (
+                task_item["assignee"] != session["username"]
+                and task_item.get("second_assignee") != session["username"]
+            ):
                 return jsonify(code=403, message="当前任务数据未分配给你。", data=None), 403
+            if task_item.get("second_assignee"):
+                return jsonify(
+                    code=409,
+                    message="双人标注任务不能跳过数据，请提交异常反馈供管理员处理。",
+                    data=None,
+                ), 409
             if task_item["task_status"] in {"待审核", "已完成", "已暂停"}:
                 return jsonify(
                     code=409, message="当前任务状态不允许跳过数据。", data=None

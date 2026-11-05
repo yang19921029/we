@@ -141,6 +141,7 @@ export function useDataItems(
             : item,
         ),
       )
+      return result
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) {
         onSessionExpired()

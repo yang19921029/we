@@ -110,6 +110,47 @@ class FakeCursor:
             if event:
                 event.update(accepted=accepted, final_label=final_label)
             self.result = None
+        elif "INSERT INTO task_item_annotations" in query:
+            task_id, item_id, annotator, label = params
+            annotation = next(
+                (
+                    row for row in self.database.task_item_annotations
+                    if row["task_id"] == task_id
+                    and row["item_id"] == item_id
+                    and row["annotator"] == annotator
+                ),
+                None,
+            )
+            if annotation:
+                annotation["label"] = label
+            else:
+                self.database.task_item_annotations.append(
+                    {
+                        "task_id": task_id,
+                        "item_id": item_id,
+                        "annotator": annotator,
+                        "label": label,
+                    }
+                )
+            self.result = None
+        elif "SELECT annotator, label FROM task_item_annotations" in query:
+            self.result = [
+                dict(row)
+                for row in self.database.task_item_annotations
+                if row["task_id"] == params[0] and row["item_id"] == params[1]
+            ]
+        elif "INSERT INTO task_item_arbitrations" in query:
+            task_id, item_id, label, adjudicator, note = params
+            self.database.arbitrations.append(
+                {
+                    "task_id": task_id,
+                    "item_id": item_id,
+                    "label": label,
+                    "adjudicator": adjudicator,
+                    "note": note,
+                }
+            )
+            self.result = None
         elif "INSERT INTO active_sessions" in query:
             session_id, user_id, auth_version = params
             self.database.active_sessions[session_id] = {
@@ -265,6 +306,19 @@ class FakeCursor:
             if len(remaining) == 2:
                 self.database.users[user_id]["auth_version"] += remaining[0]
             self.result = None
+        elif "SELECT u.id, u.role" in query and "JOIN project_members" in query:
+            user = next(
+                (
+                    user for user in self.database.users.values()
+                    if user["username"] == params[0] and user["is_active"]
+                ),
+                None,
+            )
+            self.result = (
+                {"id": user["id"], "role": user["role"]}
+                if user and params[1] in self.database.member_project_ids
+                else None
+            )
         elif "FROM users" in query:
             if "COUNT(*) AS total" in query:
                 self.result = {
@@ -345,17 +399,161 @@ class FakeCursor:
                 self.result = dict(self.database.users[7])
             else:
                 self.result = None
-        elif "SELECT dataset_id, label_schema_id, assignee, status" in query:
+        elif "SELECT dataset_id, label_schema_id, assignee," in query:
             task_id = params[0]
             self.result = next(
                 (dict(task) for task in self.database.tasks if task.get("id") == task_id),
                 None,
             )
+        elif "SELECT assignee, second_assignee, status FROM task_items" in query:
+            task_id, item_id = params
+            self.result = next(
+                (
+                    {
+                        "assignee": item["assignee"],
+                        "second_assignee": item.get("second_assignee"),
+                        "status": item["status"],
+                    }
+                    for item in self.database.task_items
+                    if item["task_id"] == task_id and item["item_id"] == item_id
+                ),
+                None,
+            )
+        elif "UPDATE annotation_tasks SET status = '标注中'" in query:
+            task_id = params[0]
+            for task in self.database.tasks:
+                if task.get("id") == task_id:
+                    task["status"] = "标注中"
+            self.result = None
+        elif "UPDATE task_items SET status = '已标注'" in query:
+            task_id, item_id = params
+            for item in self.database.task_items:
+                if item["task_id"] == task_id and item["item_id"] == item_id:
+                    item["status"] = "已标注"
+            self.result = None
+        elif "UPDATE task_items SET status = '待仲裁'" in query:
+            task_id, item_id = params
+            for item in self.database.task_items:
+                if item["task_id"] == task_id and item["item_id"] == item_id:
+                    item["status"] = "待仲裁"
+            self.result = None
+        elif "FROM task_items i" in query and "i.status = '待仲裁'" in query:
+            if "COUNT(*) AS total" in query:
+                self.result = {
+                    "total": sum(
+                        item["status"] == "待仲裁"
+                        for item in self.database.task_items
+                    )
+                }
+            else:
+                self.result = [
+                    {
+                        "task_id": item["task_id"],
+                        "item_id": item["item_id"],
+                        "task_name": next(
+                            (
+                                task.get("name", f"任务 {item['task_id']}")
+                                for task in self.database.tasks
+                                if task.get("id") == item["task_id"]
+                            ),
+                            f"任务 {item['task_id']}",
+                        ),
+                    }
+                    for item in self.database.task_items
+                    if item["status"] == "待仲裁"
+                ][:params[-2]]
+        elif (
+            "SELECT task_id, item_id, annotator, label" in query
+            and "FROM task_item_annotations" in query
+        ):
+            pairs = set(zip(params[::2], params[1::2]))
+            self.result = [
+                dict(row)
+                for row in self.database.task_item_annotations
+                if (row["task_id"], row["item_id"]) in pairs
+            ]
+        elif "SELECT t.dataset_id, t.label_schema_id, t.name, d.project_id" in query:
+            task_id, item_id = params
+            task = next(
+                (task for task in self.database.tasks if task.get("id") == task_id),
+                None,
+            )
+            task_item = next(
+                (
+                    item for item in self.database.task_items
+                    if item["task_id"] == task_id and item["item_id"] == item_id
+                ),
+                None,
+            )
+            self.result = (
+                {
+                    **task,
+                    "project_id": self.database.dataset_projects.get(
+                        task.get("dataset_id", 1), 1
+                    ),
+                    **task_item,
+                }
+                if task and task_item
+                else None
+            )
+        elif "SELECT t.assignee, t.second_assignee, d.project_id" in query:
+            task_id = params[0]
+            task = next(
+                (task for task in self.database.tasks if task.get("id") == task_id),
+                None,
+            )
+            self.result = (
+                {
+                    "assignee": task["assignee"],
+                    "second_assignee": task.get("second_assignee"),
+                    "project_id": self.database.dataset_projects.get(
+                        task.get("dataset_id", 1), 1
+                    ),
+                }
+                if task
+                else None
+            )
+        elif "SELECT i.item_id FROM task_items i" in query:
+            task_id, first_assignee, second_assignee, annotator = params
+            self.result = []
+            for item in self.database.task_items:
+                assigned = (
+                    item["assignee"] == first_assignee
+                    or item.get("second_assignee") == second_assignee
+                )
+                already_submitted = any(
+                    annotation["task_id"] == item["task_id"]
+                    and annotation["item_id"] == item["item_id"]
+                    and annotation["annotator"] == annotator
+                    for annotation in self.database.task_item_annotations
+                )
+                if (
+                    item["task_id"] == task_id
+                    and item["status"] != "已跳过"
+                    and assigned
+                    and not already_submitted
+                ):
+                    self.result.append({"item_id": item["item_id"]})
+        elif (
+            "UPDATE annotation_tasks SET assignee" in query
+            and "WHERE assignee = %s" in query
+        ):
+            assignee, old_assignee = params
+            for task in self.database.tasks:
+                if task.get("assignee") == old_assignee:
+                    task["assignee"] = assignee
+            self.result = None
         elif "UPDATE annotation_tasks SET assignee" in query:
             assignee, task_id = params
             for task in self.database.tasks:
                 if task.get("id") == task_id:
                     task["assignee"] = assignee
+            self.result = None
+        elif "UPDATE annotation_tasks SET second_assignee" in query:
+            assignee, old_assignee = params
+            for task in self.database.tasks:
+                if task.get("second_assignee") == old_assignee:
+                    task["second_assignee"] = assignee
             self.result = None
         elif "UPDATE annotation_tasks SET status = %s WHERE id = %s" in query:
             status, task_id = params
@@ -370,6 +568,22 @@ class FakeCursor:
                 if task.get("id") == task_id:
                     task["status"] = "已完成"
             self.result = None
+        elif "SELECT t.id, t.name, t.second_assignee, d.project_id" in query:
+            task_id = params[0]
+            task = next(
+                (task for task in self.database.tasks if task.get("id") == task_id),
+                None,
+            )
+            self.result = (
+                {
+                    **task,
+                    "project_id": self.database.dataset_projects.get(
+                        task.get("dataset_id", 1), 1
+                    ),
+                }
+                if task
+                else None
+            )
         elif "SELECT t.id, t.name, d.project_id" in query and "FROM annotation_tasks" in query:
             task_id = params[0]
             task = next(
@@ -385,11 +599,39 @@ class FakeCursor:
                 if task
                 else None
             )
-        elif "SELECT t.status, d.project_id FROM annotation_tasks" in query:
+        elif "SELECT t.status, t.second_assignee, d.project_id FROM annotation_tasks" in query:
             task_id = params[0]
-            self.result = next(
-                (dict(task) for task in self.database.tasks if task.get("id") == task_id),
+            task = next(
+                (task for task in self.database.tasks if task.get("id") == task_id),
                 None,
+            )
+            self.result = (
+                {
+                    "status": task["status"],
+                    "second_assignee": task.get("second_assignee"),
+                    "project_id": self.database.dataset_projects.get(
+                        task.get("dataset_id", 1), 1
+                    ),
+                }
+                if task
+                else None
+            )
+        elif "SELECT t.id, t.second_assignee, d.project_id FROM annotation_tasks" in query:
+            task_id = params[0]
+            task = next(
+                (task for task in self.database.tasks if task.get("id") == task_id),
+                None,
+            )
+            self.result = (
+                {
+                    "id": task_id,
+                    "second_assignee": task.get("second_assignee"),
+                    "project_id": self.database.dataset_projects.get(
+                        task.get("dataset_id", 1), 1
+                    ),
+                }
+                if task
+                else None
             )
         elif "SELECT task_id" in query and "FROM task_items WHERE item_id" in query:
             self.result = [
@@ -432,11 +674,26 @@ class FakeCursor:
                     for item in self.database.task_items
                 )
             }
+        elif (
+            "UPDATE task_items SET assignee" in query
+            and "WHERE assignee = %s" in query
+        ):
+            assignee, old_assignee = params
+            for item in self.database.task_items:
+                if item.get("assignee") == old_assignee:
+                    item["assignee"] = assignee
+            self.result = None
         elif "UPDATE task_items SET assignee" in query:
             assignee, task_id = params
             for item in self.database.task_items:
                 if item["task_id"] == task_id:
                     item["assignee"] = assignee
+            self.result = None
+        elif "UPDATE task_items SET second_assignee" in query:
+            assignee, old_assignee = params
+            for item in self.database.task_items:
+                if item.get("second_assignee") == old_assignee:
+                    item["second_assignee"] = assignee
             self.result = None
         elif "INSERT INTO annotation_issues" in query:
             item_id, dataset_id, project_id, issue_type, description, reported_by = params
@@ -576,6 +833,52 @@ class FakeCursor:
             )
         elif "UPDATE datasets SET record_count = record_count +" in query:
             self.result = None
+        elif "INSERT INTO annotation_tasks" in query:
+            (
+                name,
+                dataset_id,
+                label_schema_id,
+                assignee,
+                second_assignee,
+                priority,
+                deadline,
+                instructions,
+                created_by,
+                dataset_version_id,
+            ) = params
+            task_id = max(
+                (task["id"] for task in self.database.tasks),
+                default=0,
+            ) + 1
+            task = {
+                "id": task_id,
+                "name": name,
+                "dataset_id": dataset_id,
+                "label_schema_id": label_schema_id,
+                "assignee": assignee,
+                "second_assignee": second_assignee,
+                "priority": priority,
+                "status": "待标注",
+                "deadline": deadline,
+                "instructions": instructions,
+                "created_by": created_by,
+                "dataset_version_id": dataset_version_id,
+            }
+            self.database.tasks.append(task)
+            self.lastrowid = task_id
+            self.result = None
+        elif "INSERT INTO task_items" in query:
+            task_id, item_id, assignee, second_assignee = params
+            self.database.task_items.append(
+                {
+                    "task_id": task_id,
+                    "item_id": item_id,
+                    "assignee": assignee,
+                    "second_assignee": second_assignee,
+                    "status": "待标注",
+                }
+            )
+            self.result = None
         elif "SELECT COALESCE(MAX(version), 0) AS current_version FROM dataset_versions" in query:
             versions = [
                 version["version"]
@@ -627,6 +930,21 @@ class FakeCursor:
         elif "SELECT project_id FROM datasets WHERE id" in query:
             project_id = self.database.dataset_projects.get(params[0])
             self.result = {"project_id": project_id} if project_id else None
+        elif "SELECT id, project_id FROM datasets WHERE id" in query:
+            project_id = self.database.dataset_projects.get(params[0])
+            self.result = {"id": params[0], "project_id": project_id} if project_id else None
+        elif "SELECT id FROM label_schemas WHERE id" in query:
+            self.result = {"id": params[0]} if params[0] == 1 else None
+        elif "SELECT id, version FROM dataset_versions" in query:
+            versions = [
+                version for version in self.database.dataset_versions
+                if version["dataset_id"] == params[0]
+            ]
+            self.result = (
+                {"id": versions[-1]["id"], "version": versions[-1]["version"]}
+                if versions
+                else None
+            )
         elif "SELECT id FROM projects WHERE id" in query:
             self.result = {"id": params[0]} if params[0] in {1, 2} else None
         elif "SELECT t.dataset_id, t.label_schema_id" in query:
@@ -643,7 +961,10 @@ class FakeCursor:
         elif "FROM label_schemas" in query and "SELECT labels_json" in query:
             self.result = {
                 "labels_json": json.dumps(
-                    [{"code": "positive", "name": "正向"}],
+                    [
+                        {"code": "positive", "name": "正向"},
+                        {"code": "negative", "name": "负向"},
+                    ],
                     ensure_ascii=False,
                 )
             }
@@ -850,6 +1171,8 @@ class FakeDatabase:
         self.member_relations = set()
         self.tasks = []
         self.task_items = []
+        self.task_item_annotations = []
+        self.arbitrations = []
         self.dataset_versions = []
         self.exports = []
         self.ai_events = []
@@ -1019,37 +1342,59 @@ class FakeElastic:
                 },
             }
         item_ids = list(self.items)
-        if query.get("bool", {}).get("filter"):
-            filter_query = query["bool"]["filter"][0]
-            if "should" in filter_query.get("bool", {}) and any(
-                "term" in clause
-                and ("label" in clause["term"] or "label.keyword" in clause["term"])
-                for clause in filter_query["bool"]["should"]
-            ):
-                clauses = filter_query["bool"]["should"]
-                label_term = next(
-                    clause["term"].get("label", clause["term"].get("label.keyword"))
-                    for clause in clauses
-                    if "term" in clause
+        for filter_query in query.get("bool", {}).get("filter", []):
+            if "ids" in filter_query:
+                allowed_ids = set(filter_query["ids"]["values"])
+                item_ids = [item_id for item_id in item_ids if item_id in allowed_ids]
+            elif "term" in filter_query and "dataset_id" in filter_query["term"]:
+                dataset_id = filter_query["term"]["dataset_id"]
+                item_ids = [
+                    item_id
+                    for item_id in item_ids
+                    if self.items[item_id].get("dataset_id", 1) == dataset_id
+                ]
+            elif "terms" in filter_query and "dataset_id" in filter_query["terms"]:
+                dataset_ids = set(filter_query["terms"]["dataset_id"])
+                item_ids = [
+                    item_id
+                    for item_id in item_ids
+                    if self.items[item_id].get("dataset_id", 1) in dataset_ids
+                ]
+            elif "exists" in filter_query and filter_query["exists"].get("field") == "label":
+                item_ids = [
+                    item_id for item_id in item_ids if self.items[item_id].get("label") is not None
+                ]
+            elif "bool" in filter_query:
+                bool_filter = filter_query["bool"]
+                label_clauses = bool_filter.get("should", [])
+                if label_clauses and any(
+                    "term" in clause
                     and ("label" in clause["term"] or "label.keyword" in clause["term"])
-                )
-                item_ids = [
-                    item_id
-                    for item_id in item_ids
-                    if self.items[item_id].get("label") == label_term
-                ]
-            elif "exists" in filter_query:
-                item_ids = [
-                    item_id
-                    for item_id in item_ids
-                    if self.items[item_id].get("label") is not None
-                ]
-            else:
-                item_ids = [
-                    item_id
-                    for item_id in item_ids
-                    if self.items[item_id].get("label") is None
-                ]
+                    for clause in label_clauses
+                ):
+                    label = next(
+                        clause["term"].get("label", clause["term"].get("label.keyword"))
+                        for clause in label_clauses
+                        if "term" in clause
+                        and ("label" in clause["term"] or "label.keyword" in clause["term"])
+                    )
+                    item_ids = [
+                        item_id for item_id in item_ids
+                        if self.items[item_id].get("label") == label
+                    ]
+                elif bool_filter.get("must_not"):
+                    item_ids = [
+                        item_id for item_id in item_ids
+                        if self.items[item_id].get("label") is None
+                    ]
+                elif label_clauses and any(
+                    "term" in clause and "dataset_id" in clause["term"]
+                    for clause in label_clauses
+                ):
+                    item_ids = [
+                        item_id for item_id in item_ids
+                        if self.items[item_id].get("dataset_id", 1) == 1
+                    ]
         start = from_
         if search_after is not None:
             start = int(search_after[0]) + 1
@@ -1155,6 +1500,22 @@ class FakeElastic:
                     "reviewed_by": params["reviewer"],
                     "review_note": params["note"],
                     "reviewed_at": params["reviewed_at"],
+                }
+            )
+        elif "adjudicator" in params:
+            self.items[id].setdefault("label_history", []).append(
+                {
+                    "label": params["label"],
+                    "labeled_by": params["adjudicator"],
+                    "labeled_at": params["labeled_at"],
+                }
+            )
+            self.items[id].update(
+                {
+                    "label": params["label"],
+                    "labeled_by": params["adjudicator"],
+                    "labeled_at": params["labeled_at"],
+                    "updated_at": params["labeled_at"],
                 }
             )
 
@@ -2641,6 +3002,250 @@ class ApiTestCase(unittest.TestCase):
             {"exists": {"field": "reviewed_at"}},
             self.elastic.search_queries[-1]["bool"]["filter"],
         )
+
+    def test_create_task_supports_an_optional_distinct_second_annotator(self):
+        for user_id, username in ((8, "first-annotator"), (9, "second-annotator")):
+            self.database.users[user_id] = {
+                "id": user_id,
+                "username": username,
+                "password_hash": generate_password_hash("correct-password"),
+                "role": "标注员",
+                "is_active": 1,
+                "email": None,
+                "email_verified_at": None,
+                "auth_version": 0,
+            }
+        self.database.member_project_ids.add(1)
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+
+        response = self.client.post(
+            "/api/tasks",
+            json={
+                "name": "双人独立标注",
+                "dataset_id": 1,
+                "label_schema_id": 1,
+                "assignee": "first-annotator",
+                "second_assignee": "second-annotator",
+                "priority": "中",
+                "instructions": "独立判断后提交",
+            },
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(response.json["data"]["second_assignee"], "second-annotator")
+        self.assertTrue(self.database.task_items)
+        self.assertTrue(
+            all(
+                item["second_assignee"] == "second-annotator"
+                for item in self.database.task_items
+            )
+        )
+        self.assertIn(
+            "second-annotator",
+            [notification["recipient"] for notification in self.database.notifications],
+        )
+
+    def test_renaming_second_annotator_updates_task_assignments(self):
+        self.database.users[8] = {
+            "id": 8,
+            "username": "second-annotator",
+            "password_hash": generate_password_hash("correct-password"),
+            "role": "标注员",
+            "is_active": 1,
+            "email": None,
+            "email_verified_at": None,
+            "auth_version": 0,
+        }
+        self.database.tasks.append(
+            {
+                "id": 9,
+                "name": "双人复核任务",
+                "dataset_id": 1,
+                "assignee": "tester",
+                "second_assignee": "second-annotator",
+                "status": "待标注",
+            }
+        )
+        self.database.task_items.append(
+            {
+                "task_id": 9,
+                "item_id": "doc-1",
+                "assignee": "tester",
+                "second_assignee": "second-annotator",
+                "status": "待标注",
+            }
+        )
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+
+        response = self.client.patch(
+            "/api/users/8",
+            json={"username": "renamed-annotator"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.database.tasks[0]["second_assignee"], "renamed-annotator")
+        self.assertEqual(
+            self.database.task_items[0]["second_assignee"],
+            "renamed-annotator",
+        )
+
+    def test_double_annotation_conflict_requires_reviewer_adjudication(self):
+        self.database.users[8] = {
+            "id": 8,
+            "username": "second-annotator",
+            "password_hash": generate_password_hash("correct-password"),
+            "role": "标注员",
+            "is_active": 1,
+            "email": None,
+            "email_verified_at": None,
+            "auth_version": 0,
+        }
+        self.database.member_project_ids.add(1)
+        self.database.tasks.append(
+            {
+                "id": 9,
+                "name": "双人复核任务",
+                "dataset_id": 1,
+                "label_schema_id": 1,
+                "assignee": "tester",
+                "second_assignee": "second-annotator",
+                "status": "待标注",
+            }
+        )
+        self.database.task_items.append(
+            {
+                "task_id": 9,
+                "item_id": "doc-1",
+                "assignee": "tester",
+                "second_assignee": "second-annotator",
+                "status": "待标注",
+            }
+        )
+        self.database.tasks.append(
+            {
+                "id": 10,
+                "name": "双人一致任务",
+                "dataset_id": 1,
+                "label_schema_id": 1,
+                "assignee": "tester",
+                "second_assignee": "second-annotator",
+                "status": "待标注",
+            }
+        )
+        self.database.task_items.append(
+            {
+                "task_id": 10,
+                "item_id": "doc-2",
+                "assignee": "tester",
+                "second_assignee": "second-annotator",
+                "status": "待标注",
+            }
+        )
+        self.elastic.items["doc-1"].update(
+            {"dataset_id": 1, "content": "需要双人标注的文本"}
+        )
+        self.elastic.items["doc-2"] = {
+            "dataset_id": 1,
+            "content": "两位标注员意见一致的文本",
+        }
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        first_label = self.client.put(
+            "/api/data-items/doc-1/label",
+            json={"label": "正向", "task_id": 9},
+        )
+        self.assertEqual(first_label.status_code, 200)
+        self.assertEqual(first_label.json["data"]["status"], "等待另一位标注员")
+
+        self.client.post(
+            "/api/logout",
+            json={},
+        )
+        second_login = self.client.post(
+            "/api/login",
+            json={
+                "username": "second-annotator",
+                "password": "correct-password",
+            },
+        )
+        self.assertEqual(second_login.status_code, 200)
+        task_queue = self.client.get(
+            "/api/data-items?task_id=9&page=1&page_size=20"
+        )
+        self.assertEqual(task_queue.status_code, 200)
+        self.assertEqual(
+            [item["id"] for item in task_queue.json["data"]["items"]],
+            ["doc-1"],
+        )
+        second_label = self.client.put(
+            "/api/data-items/doc-1/label",
+            json={"label": "负向", "task_id": 9},
+        )
+        self.assertEqual(
+            second_label.status_code,
+            200,
+            second_label.get_json(),
+        )
+        self.assertEqual(second_label.json["data"]["status"], "待仲裁")
+        self.assertEqual(self.database.task_items[0]["status"], "待仲裁")
+
+        self.client.post("/api/logout", json={})
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        self.client.put(
+            "/api/data-items/doc-2/label",
+            json={"label": "正向", "task_id": 10},
+        )
+        self.client.post("/api/logout", json={})
+        self.client.post(
+            "/api/login",
+            json={
+                "username": "second-annotator",
+                "password": "correct-password",
+            },
+        )
+        agreed_label = self.client.put(
+            "/api/data-items/doc-2/label",
+            json={"label": "正向", "task_id": 10},
+        )
+        self.assertEqual(agreed_label.status_code, 200)
+        self.assertEqual(self.database.task_items[1]["status"], "已标注")
+        self.assertEqual(self.database.tasks[1]["status"], "待审核")
+        self.assertEqual(self.elastic.items["doc-2"]["label"], "正向")
+
+        self.client.post("/api/logout", json={})
+        with self.client.session_transaction() as session:
+            self.database.users[7]["role"] = "审核员"
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        arbitration_queue = self.client.get("/api/arbitrations")
+        self.assertEqual(arbitration_queue.status_code, 200)
+        self.assertEqual(arbitration_queue.json["data"]["total"], 1)
+        self.assertEqual(
+            {candidate["label"] for candidate in arbitration_queue.json["data"]["items"][0]["candidates"]},
+            {"正向", "负向"},
+        )
+        result = self.client.post(
+            "/api/tasks/9/items/doc-1/arbitrate",
+            json={"label": "正向", "note": "结合标注规范裁定为正向。"},
+        )
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json["data"]["label"], "正向")
+        self.assertEqual(self.database.task_items[0]["status"], "已标注")
+        self.assertEqual(self.database.tasks[0]["status"], "待审核")
+        self.assertEqual(len(self.database.arbitrations), 1)
 
     def test_label_endpoint_rejects_invalid_label_and_unknown_item(self):
         self.client.post(

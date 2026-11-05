@@ -355,7 +355,7 @@ def register_data_query_routes(app):
             with app_module.get_db().cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT t.assignee, d.project_id
+                    SELECT t.assignee, t.second_assignee, d.project_id
                     FROM annotation_tasks t
                     JOIN datasets d ON d.id = t.dataset_id
                     WHERE t.id = %s
@@ -370,16 +370,38 @@ def register_data_query_routes(app):
                 if (
                     session.get("role") == "标注员"
                     and task["assignee"] != session["username"]
+                    and task["second_assignee"] != session["username"]
                 ):
                     return jsonify(code=403, message="当前任务未分配给你。", data=None), 403
-                cursor.execute(
-                    """
-                    SELECT item_id FROM task_items
-                    WHERE task_id = %s AND status != '已跳过'
-                    ORDER BY item_id
-                    """,
-                    (task_id,),
-                )
+                if session.get("role") == "标注员":
+                    cursor.execute(
+                        """
+                        SELECT i.item_id FROM task_items i
+                        WHERE i.task_id = %s AND i.status != '已跳过'
+                            AND (i.assignee = %s OR i.second_assignee = %s)
+                            AND NOT EXISTS (
+                                SELECT 1 FROM task_item_annotations a
+                                WHERE a.task_id = i.task_id AND a.item_id = i.item_id
+                                    AND a.annotator = %s
+                            )
+                        ORDER BY i.item_id
+                        """,
+                        (
+                            task_id,
+                            session["username"],
+                            session["username"],
+                            session["username"],
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT item_id FROM task_items
+                        WHERE task_id = %s AND status != '已跳过'
+                        ORDER BY item_id
+                        """,
+                        (task_id,),
+                    )
                 task_item_ids = [row["item_id"] for row in cursor.fetchall()]
             if not task_item_ids:
                 return jsonify(

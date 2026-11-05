@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   getAnnotationIssues,
+  getAnnotationArbitrations,
   getAIEvaluation,
   getQualityTrends,
   getQualityRules,
   getReviewItems,
   saveQualityRules,
+  resolveAnnotationArbitration,
+  type AnnotationArbitrationItem,
   updateAnnotationIssue,
   type AnnotationIssue,
   type AIEvaluationSummary,
@@ -62,7 +65,7 @@ export function QualityManagementPage({
   const [qualityTrends, setQualityTrends] = useState<QualityTrend[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
-  const [selectedTab, setSelectedTab] = useState<'rules' | 'report' | 'issues'>(
+  const [selectedTab, setSelectedTab] = useState<'rules' | 'report' | 'issues' | 'arbitration'>(
     route === '/operations/security' ? 'rules' : 'report',
   )
   const [rules, setRules] = useState<QualityRule[]>([])
@@ -72,6 +75,10 @@ export function QualityManagementPage({
   const [updatingIssueId, setUpdatingIssueId] = useState<number | null>(null)
   const [issueResolutions, setIssueResolutions] = useState<Record<number, string>>({})
   const [issueStatuses, setIssueStatuses] = useState<Record<number, AnnotationIssue['status']>>({})
+  const [arbitrations, setArbitrations] = useState<AnnotationArbitrationItem[]>([])
+  const [arbitrationLabels, setArbitrationLabels] = useState<Record<string, string>>({})
+  const [arbitrationNotes, setArbitrationNotes] = useState<Record<string, string>>({})
+  const [savingArbitration, setSavingArbitration] = useState<string | null>(null)
   const canManageRules = role === '超级管理员' || role === '项目管理员'
 
   const loadReport = useCallback(async () => {
@@ -130,10 +137,51 @@ export function QualityManagementPage({
     }
   }, [issueStatus, onSessionExpired])
 
+  const loadArbitrations = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const result = await getAnnotationArbitrations()
+      setArbitrations(result.items)
+      setArbitrationLabels((current) => Object.fromEntries(
+        result.items.map((item) => {
+          const key = `${item.task_id}:${item.item_id}`
+          return [key, current[key] ?? item.candidates[0]?.label ?? '']
+        }),
+      ))
+    } catch (cause) {
+      setError(handlePageError(cause, onSessionExpired, '分歧仲裁队列加载失败。'))
+    } finally {
+      setLoading(false)
+    }
+  }, [onSessionExpired])
+
   useEffect(() => {
     if (selectedTab === 'rules') void loadRules()
     if (selectedTab === 'issues') void loadIssues()
-  }, [loadIssues, loadRules, selectedTab])
+    if (selectedTab === 'arbitration') void loadArbitrations()
+  }, [loadArbitrations, loadIssues, loadRules, selectedTab])
+
+  async function submitArbitration(item: AnnotationArbitrationItem) {
+    const key = `${item.task_id}:${item.item_id}`
+    const label = arbitrationLabels[key]
+    const note = arbitrationNotes[key]?.trim() ?? ''
+    if (!label || !note) {
+      setError('请选择最终标签并填写仲裁说明。')
+      return
+    }
+    setSavingArbitration(key)
+    setError('')
+    try {
+      await resolveAnnotationArbitration(item.task_id, item.item_id, label, note)
+      setArbitrationNotes((current) => ({ ...current, [key]: '' }))
+      await loadArbitrations()
+    } catch (cause) {
+      setError(handlePageError(cause, onSessionExpired, '仲裁结果保存失败。'))
+    } finally {
+      setSavingArbitration(null)
+    }
+  }
 
   async function saveRules() {
     setIsSavingRules(true)
@@ -216,6 +264,15 @@ export function QualityManagementPage({
           type="button"
         >
           异常闭环
+        </button>
+        <button
+          aria-selected={selectedTab === 'arbitration'}
+          className={`platform-quality-tab${selectedTab === 'arbitration' ? ' is-active' : ''}`}
+          onClick={() => setSelectedTab('arbitration')}
+          role="tab"
+          type="button"
+        >
+          分歧仲裁
         </button>
       </div>
       {error && <p className="platform-error" role="alert">{error}</p>}
@@ -378,6 +435,95 @@ export function QualityManagementPage({
                       </td>
                     </tr>
                   ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      ) : selectedTab === 'arbitration' ? (
+        <section aria-label="待仲裁标注" className="platform-table-card">
+          <div className="section-title-row">
+            <div>
+              <h2>双人标注分歧</h2>
+              <p>核对两位标注员的独立结果，选择最终标签并记录仲裁说明。</p>
+            </div>
+            <button
+              className="platform-secondary-button"
+              disabled={loading}
+              onClick={() => void loadArbitrations()}
+              type="button"
+            >
+              刷新仲裁队列
+            </button>
+          </div>
+          {loading ? (
+            <p className="api-message" role="status">正在加载仲裁队列…</p>
+          ) : arbitrations.length === 0 ? (
+            <p className="data-empty">当前没有待仲裁的数据。</p>
+          ) : (
+            <div className="data-table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th scope="col">任务</th>
+                    <th scope="col">数据编号</th>
+                    <th scope="col">独立标注结果</th>
+                    <th scope="col">最终标签</th>
+                    <th scope="col">仲裁说明</th>
+                    <th scope="col">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {arbitrations.map((item) => {
+                    const key = `${item.task_id}:${item.item_id}`
+                    return (
+                      <tr key={key}>
+                        <td>{item.task_name}</td>
+                        <td>{item.item_id}</td>
+                        <td>
+                          {item.candidates.map((candidate) => (
+                            <div key={candidate.annotator}>
+                              {candidate.annotator}：{candidate.label}
+                            </div>
+                          ))}
+                        </td>
+                        <td>
+                          <select
+                            aria-label={`${item.item_id}最终仲裁标签`}
+                            onChange={(event) => setArbitrationLabels((current) => ({
+                              ...current,
+                              [key]: event.target.value,
+                            }))}
+                            value={arbitrationLabels[key] ?? ''}
+                          >
+                            {[...new Set(item.candidates.map((candidate) => candidate.label))]
+                              .map((label) => <option key={label} value={label}>{label}</option>)}
+                          </select>
+                        </td>
+                        <td>
+                          <input
+                            aria-label={`${item.item_id}仲裁说明`}
+                            maxLength={1000}
+                            onChange={(event) => setArbitrationNotes((current) => ({
+                              ...current,
+                              [key]: event.target.value,
+                            }))}
+                            value={arbitrationNotes[key] ?? ''}
+                          />
+                        </td>
+                        <td>
+                          <button
+                            className="text-link"
+                            disabled={savingArbitration === key}
+                            onClick={() => void submitArbitration(item)}
+                            type="button"
+                          >
+                            提交仲裁
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

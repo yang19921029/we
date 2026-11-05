@@ -20,6 +20,12 @@ import { DataPageHeading, DataLoadState } from './DataItemsShared'
 import { getMediaPreviews } from './mediaPreview'
 import { MultimodalAnnotationEditor } from './MultimodalAnnotationEditor'
 
+function getLabelSaveStatus(status?: string): string {
+  if (status === '等待另一位标注员') return '独立标注已提交，等待另一位标注员'
+  if (status === '待仲裁') return '标注分歧已提交仲裁'
+  return '已自动保存'
+}
+
 export function DataLabelPage({
   onSessionExpired,
   initialTaskId,
@@ -157,14 +163,14 @@ export function DataLabelPage({
       setIsSaving(true)
       setSaveError('')
       void saveLabel(itemId, label, annotationToSave)
-        .then(() => {
+        .then((result) => {
           if (
             saveVersion.current === version &&
             selectedIdRef.current === itemId
           ) {
             setIsDirty(false)
             setAnnotationDirty(false)
-            setSaveStatus('已自动保存')
+            setSaveStatus(getLabelSaveStatus(result.status))
           }
         })
         .catch((cause: unknown) => {
@@ -189,7 +195,7 @@ export function DataLabelPage({
     setAnnotationDirty(false)
     setIsSaving(true)
     void saveLabel(itemId, label, annotationToSave)
-      .then(() => setSaveStatus('已自动保存'))
+      .then((result) => setSaveStatus(getLabelSaveStatus(result.status)))
       .catch((cause: unknown) => {
         setIsDirty(labelWasDirty)
         setAnnotationDirty(annotationWasDirty)
@@ -212,8 +218,8 @@ export function DataLabelPage({
     setAnnotationDirty(false)
     setIsSaving(true)
     try {
-      await saveLabel(selectedItem.id, label, annotationToSave)
-      setSaveStatus('已自动保存')
+      const result = await saveLabel(selectedItem.id, label, annotationToSave)
+      setSaveStatus(getLabelSaveStatus(result.status))
     } catch (cause) {
       setIsDirty(labelWasDirty)
       setAnnotationDirty(annotationWasDirty)
@@ -399,14 +405,18 @@ export function DataLabelPage({
     setIsDirty(false)
     setIsSaving(true)
     try {
-      await saveLabel(
+      const result = await saveLabel(
         selectedItem.id,
         label,
         annotationDirty ? annotation ?? { items: [] } : undefined,
       )
       setAnnotationDirty(false)
       setAutoSaveBlocked(false)
-      setSaveStatus(`数据 #${selectedItem.id} 已保存`)
+      setSaveStatus(
+        result.status
+          ? getLabelSaveStatus(result.status)
+          : `数据 #${selectedItem.id} 已保存`,
+      )
     } catch (cause) {
       setIsDirty(labelWasDirty)
       setAnnotationDirty(annotationWasDirty)
@@ -471,6 +481,7 @@ export function DataLabelPage({
           {tasks.map((task) => (
             <option key={task.id} value={task.id}>
               {task.name} · {task.status} · {task.assignee}
+              {task.second_assignee ? ` + ${task.second_assignee}` : ''}
             </option>
           ))}
         </select>
@@ -683,7 +694,7 @@ export function DataLabelPage({
                 >
                   保存并下一条
                 </button>
-                {selectedTask && (
+                {selectedTask && !selectedTask.second_assignee && (
                   <button
                     className="annotation-issue-toggle"
                     disabled={isSaving || selectedTask.status === '已暂停'}

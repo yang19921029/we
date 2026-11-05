@@ -17,6 +17,7 @@ from pymysql.err import IntegrityError
 
 from app import (
     accessible_dataset_ids,
+    accessible_project_ids,
     can_access_data_source,
     can_access_dataset,
     elastic_error_response,
@@ -216,6 +217,18 @@ def register_admin_routes(app):
                     "UPDATE annotation_tasks SET assignee = %s WHERE assignee = %s",
                     (username, user["username"]),
                 )
+                cursor.execute(
+                    "UPDATE annotation_tasks SET second_assignee = %s WHERE second_assignee = %s",
+                    (username, user["username"]),
+                )
+                cursor.execute(
+                    "UPDATE task_items SET assignee = %s WHERE assignee = %s",
+                    (username, user["username"]),
+                )
+                cursor.execute(
+                    "UPDATE task_items SET second_assignee = %s WHERE second_assignee = %s",
+                    (username, user["username"]),
+                )
             if session.get("user_id") == user_id and password is not None:
                 cursor.execute(
                     """
@@ -223,10 +236,6 @@ def register_admin_routes(app):
                     WHERE session_id = %s AND user_id = %s
                     """,
                     (session.get("session_id"), user_id),
-                )
-                cursor.execute(
-                    "UPDATE task_items SET assignee = %s WHERE assignee = %s",
-                    (username, user["username"]),
                 )
 
         details = {
@@ -602,7 +611,7 @@ def register_admin_routes(app):
         db = app_module.get_db()
         with db.cursor() as cursor:
             cursor.execute(
-                "SELECT task_id, assignee FROM task_items WHERE item_id = %s",
+                "SELECT task_id, assignee, second_assignee FROM task_items WHERE item_id = %s",
                 (item_id,),
             )
             task_items = cursor.fetchall()
@@ -637,22 +646,29 @@ def register_admin_routes(app):
                                 """,
                                 (task_id,),
                             )
-                for assignee in {
-                    row.get("assignee")
-                    for row in task_items
-                    if row.get("assignee") and row["assignee"] != session["username"]
-                }:
-                    add_notification(
-                        cursor,
-                        assignee,
-                        "标注审核结果已更新",
-                        (
-                            f"数据 {item_id} 已通过审核。"
-                            if decision == "approved"
-                            else f"数据 {item_id} 已退回，请根据审核意见修改。"
-                        ),
-                        f"/data/label/{task_ids[0]['task_id']}",
-                    )
+                notified = set()
+                for task_item in task_items:
+                    for assignee in (
+                        task_item.get("assignee"),
+                        task_item.get("second_assignee"),
+                    ):
+                        if (
+                            assignee
+                            and assignee != session["username"]
+                            and assignee not in notified
+                        ):
+                            add_notification(
+                                cursor,
+                                assignee,
+                                "标注审核结果已更新",
+                                (
+                                    f"数据 {item_id} 已通过审核。"
+                                    if decision == "approved"
+                                    else f"数据 {item_id} 已退回，请根据审核意见修改。"
+                                ),
+                                f"/data/label/{task_item['task_id']}",
+                            )
+                            notified.add(assignee)
         db.commit()
         return jsonify(
             code=0,
@@ -727,6 +743,263 @@ def register_admin_routes(app):
                 }
             )
         return jsonify(code=0, message="ok", data=trends)
+
+    @app.get("/api/arbitrations")
+    @login_required
+    @role_required("超级管理员", "项目管理员", "审核员")
+    def list_arbitrations():
+        try:
+            page = int(request.args.get("page", "1"))
+            page_size = int(request.args.get("page_size", "20"))
+        except ValueError:
+            return jsonify(code=400, message="分页参数必须是整数。", data=None), 400
+        if page < 1 or not 1 <= page_size <= 100:
+            return jsonify(code=400, message="分页参数无效。", data=None), 400
+        project_ids = accessible_project_ids()
+        if project_ids is not None and not project_ids:
+            return jsonify(
+                code=0,
+                message="ok",
+                data={"items": [], "total": 0, "page": page, "page_size": page_size},
+            )
+        project_filter = ""
+        project_params = ()
+        if project_ids is not None:
+            placeholders = ", ".join(["%s"] * len(project_ids))
+            project_filter = f" AND d.project_id IN ({placeholders})"
+            project_params = tuple(sorted(project_ids))
+        with app_module.get_db().cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM task_items i
+                JOIN annotation_tasks t ON t.id = i.task_id
+                JOIN datasets d ON d.id = t.dataset_id
+                WHERE i.status = '待仲裁'
+                """ + project_filter,
+                project_params,
+            )
+            total = cursor.fetchone()["total"]
+            cursor.execute(
+                """
+                SELECT i.task_id, i.item_id, t.name AS task_name
+                FROM task_items i
+                JOIN annotation_tasks t ON t.id = i.task_id
+                JOIN datasets d ON d.id = t.dataset_id
+                WHERE i.status = '待仲裁'
+                """ + project_filter + """
+                ORDER BY i.created_at, i.task_id, i.item_id
+                LIMIT %s OFFSET %s
+                """,
+                (*project_params, page_size, (page - 1) * page_size),
+            )
+            items = [dict(row) for row in cursor.fetchall()]
+            if items:
+                candidate_filters = " OR ".join(
+                    "(task_id = %s AND item_id = %s)" for _ in items
+                )
+                candidate_params = tuple(
+                    value
+                    for item in items
+                    for value in (item["task_id"], item["item_id"])
+                )
+                cursor.execute(
+                    f"""
+                    SELECT task_id, item_id, annotator, label
+                    FROM task_item_annotations
+                    WHERE {candidate_filters}
+                    ORDER BY task_id, item_id, annotator
+                    """,
+                    candidate_params,
+                )
+                candidates = {}
+                for row in cursor.fetchall():
+                    candidates.setdefault(
+                        (row["task_id"], row["item_id"]), []
+                    ).append(
+                        {"annotator": row["annotator"], "label": row["label"]}
+                    )
+                for item in items:
+                    item["candidates"] = candidates.get(
+                        (item["task_id"], item["item_id"]), []
+                    )
+        return jsonify(
+            code=0,
+            message="ok",
+            data={"items": items, "total": total, "page": page, "page_size": page_size},
+        )
+
+    @app.post("/api/tasks/<int:task_id>/items/<path:item_id>/arbitrate")
+    @login_required
+    @role_required("超级管理员", "项目管理员", "审核员")
+    def arbitrate_task_item(task_id: int, item_id: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(code=400, message="请求体必须是 JSON 对象。", data=None), 400
+        label = payload.get("label")
+        note = payload.get("note")
+        if not isinstance(label, str) or not label.strip() or len(label) > 191:
+            return jsonify(code=400, message="请提供有效的最终标签。", data=None), 400
+        if not isinstance(note, str) or not note.strip() or len(note) > 1000:
+            return jsonify(code=400, message="仲裁说明不能为空且不能超过 1000 个字符。", data=None), 400
+        db = app_module.get_db()
+        with db.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT t.dataset_id, t.label_schema_id, t.name, d.project_id,
+                    i.status, i.assignee, i.second_assignee
+                FROM annotation_tasks t
+                JOIN datasets d ON d.id = t.dataset_id
+                JOIN task_items i ON i.task_id = t.id
+                WHERE t.id = %s AND i.item_id = %s
+                FOR UPDATE
+                """,
+                (task_id, item_id),
+            )
+            task_item = cursor.fetchone()
+            if task_item is None:
+                return jsonify(code=404, message="任务数据不存在。", data=None), 404
+            if not user_can_access_project(task_item["project_id"]):
+                return jsonify(code=403, message="无权仲裁该项目数据。", data=None), 403
+            if task_item["status"] != "待仲裁":
+                return jsonify(code=409, message="该数据当前不在仲裁队列中。", data=None), 409
+            cursor.execute(
+                """
+                SELECT annotator, label FROM task_item_annotations
+                WHERE task_id = %s AND item_id = %s
+                ORDER BY annotator
+                """,
+                (task_id, item_id),
+            )
+            candidates = cursor.fetchall()
+            if len(candidates) != 2 or candidates[0]["label"] == candidates[1]["label"]:
+                return jsonify(code=409, message="该数据没有有效的标注分歧可供仲裁。", data=None), 409
+            cursor.execute(
+                "SELECT labels_json FROM label_schemas WHERE id = %s",
+                (task_item["label_schema_id"],),
+            )
+            schema = cursor.fetchone()
+        if schema is None:
+            return jsonify(code=409, message="任务标签体系不存在。", data=None), 409
+        allowed_labels = {
+            option["name"] for option in json.loads(schema["labels_json"])
+        }
+        if label not in allowed_labels:
+            return jsonify(code=400, message="最终标签必须属于当前任务标签体系。", data=None), 400
+
+        labeled_at = datetime.now(timezone.utc).isoformat()
+        try:
+            client = app_module.get_es_client()
+            document = client.get(
+                index=current_app.config["ELASTICSEARCH_INDEX"],
+                id=item_id,
+            )
+            source = document.get("_source") or {}
+            if not can_access_data_source(source):
+                return jsonify(code=403, message="无权访问该项目数据。", data=None), 403
+            if task_item["dataset_id"] != source.get("dataset_id", 1):
+                return jsonify(code=400, message="数据不属于当前任务的数据集。", data=None), 400
+            client.update(
+                index=current_app.config["ELASTICSEARCH_INDEX"],
+                id=item_id,
+                script={
+                    "lang": "painless",
+                    "source": """
+                        if (ctx._source.label_history == null) {
+                            ctx._source.label_history = [];
+                        }
+                        ctx._source.label_history.add([
+                            'label': params.label,
+                            'labeled_by': params.adjudicator,
+                            'labeled_at': params.labeled_at
+                        ]);
+                        ctx._source.label = params.label;
+                        ctx._source.labeled_by = params.adjudicator;
+                        ctx._source.labeled_at = params.labeled_at;
+                        ctx._source.remove('review_status');
+                        ctx._source.remove('reviewed_by');
+                        ctx._source.remove('reviewed_at');
+                        ctx._source.remove('review_note');
+                        ctx._source.updated_at = params.labeled_at;
+                    """,
+                    "params": {
+                        "label": label,
+                        "adjudicator": session["username"],
+                        "labeled_at": labeled_at,
+                    },
+                },
+                doc_as_upsert=False,
+                refresh="wait_for",
+            )
+        except NotFoundError as error:
+            return elastic_error_response(error)
+        except (ApiError, TransportError, RuntimeError, ValueError) as error:
+            return elastic_error_response(error)
+
+        with db.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO task_item_arbitrations
+                    (task_id, item_id, label, adjudicator, note)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (task_id, item_id, label, session["username"], note.strip()),
+            )
+            cursor.execute(
+                """
+                UPDATE task_items SET status = '已标注'
+                WHERE task_id = %s AND item_id = %s AND status = '待仲裁'
+                """,
+                (task_id, item_id),
+            )
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS remaining FROM task_items
+                WHERE task_id = %s AND status NOT IN ('已标注', '已审核', '已跳过')
+                """,
+                (task_id,),
+            )
+            next_status = "标注中"
+            if cursor.fetchone()["remaining"] == 0:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS awaiting_review FROM task_items
+                    WHERE task_id = %s AND status = '已标注'
+                    """,
+                    (task_id,),
+                )
+                next_status = (
+                    "待审核"
+                    if cursor.fetchone()["awaiting_review"]
+                    else "已完成"
+                )
+            cursor.execute(
+                "UPDATE annotation_tasks SET status = %s WHERE id = %s",
+                (next_status, task_id),
+            )
+            for annotator in {
+                task_item["assignee"],
+                task_item.get("second_assignee"),
+            } - {None, session["username"]}:
+                add_notification(
+                    cursor,
+                    annotator,
+                    "标注分歧已仲裁",
+                    f"数据 {item_id} 的最终标签为“{label}”。",
+                    f"/data/label/{task_id}",
+                )
+        write_audit_log(
+            "仲裁标注分歧",
+            "任务数据",
+            item_id,
+            {"task_id": task_id, "label": label, "note": note.strip()},
+        )
+        db.commit()
+        return jsonify(
+            code=0,
+            message="仲裁结果已保存。",
+            data={"task_id": task_id, "item_id": item_id, "label": label},
+        )
 
     @app.get("/api/data-items/<path:item_id>/quality-check")
     @login_required

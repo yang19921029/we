@@ -55,6 +55,7 @@ export function TaskManagementPage({
   const [datasetId, setDatasetId] = useState('')
   const [schemaId, setSchemaId] = useState('')
   const [assignee, setAssignee] = useState('')
+  const [secondAssignee, setSecondAssignee] = useState('')
   const [priority, setPriority] = useState<AnnotationTask['priority']>('中')
   const [deadline, setDeadline] = useState('')
   const [instructions, setInstructions] = useState('')
@@ -110,6 +111,11 @@ export function TaskManagementPage({
   const assigneeMembers = selectedDataset
     ? membersByProject[selectedDataset.project_id] ?? []
     : []
+  const primaryAssigneeMembers = secondAssignee
+    ? assigneeMembers.filter(
+      (member) => member.role === '标注员' && member.username !== secondAssignee,
+    )
+    : assigneeMembers
   const batchAssigneeOptions = [...new Map(
     Object.values(membersByProject)
       .flat()
@@ -133,7 +139,7 @@ export function TaskManagementPage({
       setError('请选择有效的标签体系。')
       return
     }
-    if (!assigneeMembers.some((member) => member.username === assignee)) {
+    if (!primaryAssigneeMembers.some((member) => member.username === assignee)) {
       setError('请选择当前项目中的有效负责人。')
       return
     }
@@ -146,6 +152,7 @@ export function TaskManagementPage({
         dataset_id: selectedDatasetId,
         label_schema_id: selectedSchemaId,
         assignee: assignee.trim(),
+        second_assignee: secondAssignee || null,
         priority,
         deadline,
         instructions: instructions.trim(),
@@ -153,6 +160,7 @@ export function TaskManagementPage({
       setName('')
       setInstructions('')
       setDeadline('')
+      setSecondAssignee('')
       setIsCreateOpen(false)
       setStatus('标注任务已创建。')
       if (page === 1) {
@@ -361,19 +369,24 @@ export function TaskManagementPage({
                       {(() => {
                         const taskMembers = membersByProject[task.project_id] ?? []
                         return (
-                      <select
-                        aria-label={`${task.name}负责人`}
-                        className="platform-task-select platform-task-select-assignee"
-                        onChange={(event) => void changeAssignee(task, event.target.value)}
-                        value={task.assignee}
-                      >
-                        {!taskMembers.some((user) => user.username === task.assignee) && (
-                          <option value={task.assignee}>{task.assignee}</option>
-                        )}
-                        {taskMembers.map((user) => (
-                          <option key={user.id} value={user.username}>{user.username}</option>
-                        ))}
-                      </select>
+                          <>
+                            <select
+                              aria-label={`${task.name}负责人`}
+                              className="platform-task-select platform-task-select-assignee"
+                              onChange={(event) => void changeAssignee(task, event.target.value)}
+                              value={task.assignee}
+                            >
+                              {!taskMembers.some((user) => user.username === task.assignee) && (
+                                <option value={task.assignee}>{task.assignee}</option>
+                              )}
+                              {taskMembers.map((user) => (
+                                <option key={user.id} value={user.username}>{user.username}</option>
+                              ))}
+                            </select>
+                            {task.second_assignee && (
+                              <small>第二标注员：{task.second_assignee}</small>
+                            )}
+                          </>
                         )
                       })()}
                     </td>
@@ -447,7 +460,26 @@ export function TaskManagementPage({
               </label>
               <label>
                 数据集
-                <select onChange={(event) => setDatasetId(event.target.value)} required value={datasetId}>
+                <select
+                  onChange={(event) => {
+                    const nextDatasetId = event.target.value
+                    const nextDataset = datasets.find(
+                      (dataset) => String(dataset.id) === nextDatasetId,
+                    )
+                    const nextMembers = nextDataset
+                      ? membersByProject[nextDataset.project_id] ?? []
+                      : []
+                    setDatasetId(nextDatasetId)
+                    setSecondAssignee('')
+                    setAssignee(
+                      nextMembers.find((member) => member.role === '标注员')?.username
+                        ?? nextMembers[0]?.username
+                        ?? '',
+                    )
+                  }}
+                  required
+                  value={datasetId}
+                >
                   {datasets.map((dataset) => (
                     <option key={dataset.id} value={dataset.id}>
                       {dataset.project_name} / {dataset.name}
@@ -466,9 +498,43 @@ export function TaskManagementPage({
               <label>
                 负责人账号
                 <select onChange={(event) => setAssignee(event.target.value)} required value={assignee}>
-                  {assigneeMembers.map((user) => (
+                  {primaryAssigneeMembers.map((user) => (
                     <option key={user.id} value={user.username}>{user.username}（{user.role}）</option>
                   ))}
+                </select>
+              </label>
+              <label>
+                第二位独立标注员（可选）
+                <select
+                  onChange={(event) => {
+                    const nextSecondAssignee = event.target.value
+                    setSecondAssignee(nextSecondAssignee)
+                    if (
+                      nextSecondAssignee
+                      && !assigneeMembers.some(
+                        (user) => user.username === assignee
+                          && user.role === '标注员'
+                          && user.username !== nextSecondAssignee,
+                      )
+                    ) {
+                      setAssignee(
+                        assigneeMembers.find(
+                          (user) => user.role === '标注员'
+                            && user.username !== nextSecondAssignee,
+                        )?.username ?? '',
+                      )
+                    }
+                  }}
+                  value={secondAssignee}
+                >
+                  <option value="">单人标注</option>
+                  {assigneeMembers
+                    .filter((user) => user.role === '标注员' && user.username !== assignee)
+                    .map((user) => (
+                      <option key={user.id} value={user.username}>
+                        {user.username}（双人独立标注）
+                      </option>
+                    ))}
                 </select>
               </label>
               <label>
@@ -489,7 +555,7 @@ export function TaskManagementPage({
               </label>
             </div>
             {error && <p className="platform-error" role="alert">{error}</p>}
-            <button className="welcome-action" disabled={isSaving || datasets.length === 0 || schemas.length === 0 || assigneeMembers.length === 0} type="submit">
+            <button className="welcome-action" disabled={isSaving || datasets.length === 0 || schemas.length === 0 || primaryAssigneeMembers.length === 0} type="submit">
               {isSaving ? '创建中…' : '创建任务'}
             </button>
           </form>

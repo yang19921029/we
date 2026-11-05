@@ -113,7 +113,8 @@ def register_annotation_routes(app):
             with app_module.get_db().cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT dataset_id, label_schema_id, assignee, status
+                    SELECT dataset_id, label_schema_id, assignee,
+                        second_assignee, status
                     FROM annotation_tasks WHERE id = %s
                     """,
                     (task_id,),
@@ -123,7 +124,7 @@ def register_annotation_routes(app):
                     return jsonify(code=404, message="标注任务不存在。", data=None), 404
                 cursor.execute(
                     """
-                    SELECT assignee FROM task_items
+                    SELECT assignee, second_assignee, status FROM task_items
                     WHERE task_id = %s AND item_id = %s
                     """,
                     (task_id, item_id),
@@ -136,8 +137,17 @@ def register_annotation_routes(app):
                     (task["label_schema_id"],),
                 )
                 schema = cursor.fetchone()
-            if task_item["assignee"] != session["username"]:
+            if (
+                task_item["assignee"] != session["username"]
+                and task_item.get("second_assignee") != session["username"]
+            ):
                 return jsonify(code=403, message="当前任务未分配给你。", data=None), 403
+            if task_item.get("second_assignee") and task_item["status"] != "待标注":
+                return jsonify(
+                    code=409,
+                    message="该双人标注已提交完成并进入仲裁或审核，不能继续修改。",
+                    data=None,
+                ), 409
             if task["status"] in {"待审核", "已完成", "已暂停"}:
                 return jsonify(code=409, message="当前任务状态不允许继续标注。", data=None), 409
             if schema is not None:
@@ -167,6 +177,131 @@ def register_annotation_routes(app):
             if task is not None:
                 if task["dataset_id"] != source.get("dataset_id", 1):
                     return jsonify(code=400, message="数据不属于当前任务的数据集。", data=None), 400
+                if task.get("second_assignee"):
+                    if label is None or not isinstance(label, str):
+                        return jsonify(
+                            code=400,
+                            message="双人标注必须提交具体标签。",
+                            data=None,
+                        ), 400
+                    if has_annotation:
+                        return jsonify(
+                            code=400,
+                            message="双人标注暂不支持多模态标注提交。",
+                            data=None,
+                        ), 400
+                    db = app_module.get_db()
+                    with db.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            SELECT assignee, second_assignee, status FROM task_items
+                            WHERE task_id = %s AND item_id = %s FOR UPDATE
+                            """,
+                            (task_id, item_id),
+                        )
+                        locked_task_item = cursor.fetchone()
+                        if locked_task_item is None:
+                            return jsonify(
+                                code=404, message="任务数据不存在。", data=None
+                            ), 404
+                        if (
+                            locked_task_item["assignee"] != session["username"]
+                            and locked_task_item.get("second_assignee")
+                            != session["username"]
+                        ):
+                            return jsonify(
+                                code=403, message="当前任务未分配给你。", data=None
+                            ), 403
+                        if locked_task_item["status"] != "待标注":
+                            return jsonify(
+                                code=409,
+                                message="该双人标注已提交完成并进入仲裁或审核，不能继续修改。",
+                                data=None,
+                            ), 409
+                        cursor.execute(
+                            """
+                            INSERT INTO task_item_annotations
+                                (task_id, item_id, annotator, label)
+                            VALUES (%s, %s, %s, %s)
+                            ON DUPLICATE KEY UPDATE
+                                label = VALUES(label),
+                                updated_at = CURRENT_TIMESTAMP
+                            """,
+                            (task_id, item_id, session["username"], label),
+                        )
+                        cursor.execute(
+                            """
+                            SELECT annotator, label FROM task_item_annotations
+                            WHERE task_id = %s AND item_id = %s
+                            ORDER BY annotator FOR UPDATE
+                            """,
+                            (task_id, item_id),
+                        )
+                        annotations = cursor.fetchall()
+                        cursor.execute(
+                            """
+                            UPDATE annotation_tasks SET status = '标注中'
+                            WHERE id = %s AND status = '待标注'
+                            """,
+                            (task_id,),
+                        )
+                        cursor.execute(
+                            """
+                            SELECT id, suggested_label FROM ai_preannotation_events
+                            WHERE task_id = %s AND item_id = %s
+                                AND annotator = %s AND accepted IS NULL
+                            ORDER BY id DESC LIMIT 1
+                            """,
+                            (task_id, item_id, session["username"]),
+                        )
+                        ai_event = cursor.fetchone()
+                        if ai_event is not None:
+                            cursor.execute(
+                                """
+                                UPDATE ai_preannotation_events
+                                SET accepted = %s, final_label = %s,
+                                    evaluated_at = CURRENT_TIMESTAMP
+                                WHERE id = %s
+                                """,
+                                (
+                                    int(label == ai_event["suggested_label"]),
+                                    label,
+                                    ai_event["id"],
+                                ),
+                            )
+                        if len(annotations) == 2 and annotations[0]["label"] != annotations[1]["label"]:
+                            cursor.execute(
+                                """
+                                UPDATE task_items SET status = '待仲裁'
+                                WHERE task_id = %s AND item_id = %s
+                                """,
+                                (task_id, item_id),
+                            )
+                            db.commit()
+                            write_audit_log(
+                                "提交分歧标注",
+                                "任务数据",
+                                item_id,
+                                {"task_id": task_id},
+                            )
+                            return jsonify(
+                                code=0,
+                                message="两位标注员的结果不一致，已进入仲裁。",
+                                data={"id": item_id, "label": label, "status": "待仲裁"},
+                            )
+                        if len(annotations) < 2:
+                            db.commit()
+                            write_audit_log(
+                                "提交独立标注",
+                                "任务数据",
+                                item_id,
+                                {"task_id": task_id},
+                            )
+                            return jsonify(
+                                code=0,
+                                message="独立标注已提交，等待另一位标注员完成。",
+                                data={"id": item_id, "label": label, "status": "等待另一位标注员"},
+                            )
             label_changed = not has_annotation or source.get("label") != label
             client.update(
                 index=current_app.config["ELASTICSEARCH_INDEX"],
@@ -344,7 +479,7 @@ def register_annotation_routes(app):
                 return jsonify(code=403, message="无权访问该项目任务。", data=None), 403
             cursor.execute(
                 """
-                SELECT assignee FROM task_items
+                SELECT assignee, second_assignee, status FROM task_items
                 WHERE task_id = %s AND item_id = %s
                 """,
                 (task_id, item_id),
@@ -352,8 +487,17 @@ def register_annotation_routes(app):
             task_item = cursor.fetchone()
             if task_item is None:
                 return jsonify(code=404, message="数据不属于当前标注任务。", data=None), 404
-            if task_item["assignee"] != session["username"]:
+            if (
+                task_item["assignee"] != session["username"]
+                and task_item.get("second_assignee") != session["username"]
+            ):
                 return jsonify(code=403, message="当前任务未分配给你。", data=None), 403
+            if task_item.get("second_assignee") and task_item["status"] != "待标注":
+                return jsonify(
+                    code=409,
+                    message="该双人标注已提交完成并进入仲裁或审核。",
+                    data=None,
+                ), 409
             if task["status"] in {"已完成", "已暂停"}:
                 return jsonify(code=409, message="当前任务状态不允许请求 AI 预标注。", data=None), 409
             cursor.execute(
