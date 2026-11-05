@@ -7,6 +7,7 @@ from flask import request
 from flask import session
 
 from app import (
+    accessible_project_ids,
     is_global_project_admin,
     login_required,
     role_required,
@@ -217,6 +218,65 @@ def register_workflow_routes(app):
         write_audit_log("更新", "质检规则", "all", {"rules": rules})
         db.commit()
         return jsonify(code=0, message="质检规则已保存。", data=rules)
+
+    @app.get("/api/ai-evaluation")
+    @login_required
+    @role_required(*MANAGER_ROLES)
+    def get_ai_evaluation():
+        project_ids = accessible_project_ids()
+        project_filter = ""
+        project_params = ()
+        if project_ids is not None:
+            if not project_ids:
+                return jsonify(
+                    code=0,
+                    message="ok",
+                    data={
+                        "evaluated_count": 0,
+                        "accepted_count": 0,
+                        "acceptance_rate": 0,
+                        "by_model": [],
+                    },
+                )
+            placeholders = ", ".join(["%s"] * len(project_ids))
+            project_filter = f" AND d.project_id IN ({placeholders})"
+            project_params = tuple(sorted(project_ids))
+        event_scope = """
+            FROM ai_preannotation_events e
+            JOIN annotation_tasks t ON t.id = e.task_id
+            JOIN datasets d ON d.id = t.dataset_id
+            WHERE e.accepted IS NOT NULL
+        """ + project_filter
+        with app_module.get_db().cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) AS evaluated_count, "
+                "COALESCE(SUM(e.accepted), 0) AS accepted_count "
+                + event_scope,
+                project_params,
+            )
+            summary = cursor.fetchone()
+            cursor.execute(
+                "SELECT e.model, COUNT(*) AS evaluated_count, "
+                "COALESCE(SUM(e.accepted), 0) AS accepted_count "
+                + event_scope
+                + " GROUP BY e.model ORDER BY evaluated_count DESC, e.model",
+                project_params,
+            )
+            by_model = [dict(row) for row in cursor.fetchall()]
+        evaluated_count = summary["evaluated_count"]
+        accepted_count = summary["accepted_count"]
+        return jsonify(
+            code=0,
+            message="ok",
+            data={
+                "evaluated_count": evaluated_count,
+                "accepted_count": accepted_count,
+                "acceptance_rate": round(accepted_count / evaluated_count, 4)
+                if evaluated_count
+                else 0,
+                "by_model": by_model,
+            },
+        )
 
     @app.get("/api/notifications")
     @login_required

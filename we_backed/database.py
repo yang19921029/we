@@ -202,6 +202,22 @@ def init_db(get_db) -> None:
             )
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS dataset_versions (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                dataset_id INT NOT NULL,
+                version INT NOT NULL,
+                imported_count INT NOT NULL DEFAULT 0,
+                status VARCHAR(32) NOT NULL,
+                source_name VARCHAR(255) NOT NULL,
+                created_by VARCHAR(191) NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_dataset_versions_dataset_version (dataset_id, version),
+                INDEX idx_dataset_versions_created (dataset_id, created_at)
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            """
+        )
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS label_schemas (
                 id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                 name VARCHAR(191) NOT NULL UNIQUE,
@@ -254,6 +270,11 @@ def init_db(get_db) -> None:
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
             """
         )
+        cursor.execute("SHOW COLUMNS FROM annotation_tasks LIKE 'dataset_version_id'")
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "ALTER TABLE annotation_tasks ADD COLUMN dataset_version_id BIGINT NULL"
+            )
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS task_items (
@@ -326,6 +347,41 @@ def init_db(get_db) -> None:
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 INDEX idx_notifications_recipient_created
                     (recipient, is_read, created_at)
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS export_history (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                created_by VARCHAR(191) NOT NULL,
+                dataset_id INT NULL,
+                label_status VARCHAR(32) NOT NULL,
+                export_format VARCHAR(16) NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT '生成中',
+                item_count BIGINT NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME NULL,
+                INDEX idx_export_history_user_created (created_by, created_at)
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_preannotation_events (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                task_id INT NOT NULL,
+                item_id VARCHAR(512) NOT NULL,
+                annotator VARCHAR(191) NOT NULL,
+                model VARCHAR(191) NOT NULL,
+                suggested_label VARCHAR(191) NOT NULL,
+                confidence DECIMAL(6,5) NOT NULL,
+                accepted TINYINT(1) NULL,
+                final_label VARCHAR(191) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                evaluated_at DATETIME NULL,
+                INDEX idx_ai_events_item_user (task_id, item_id, annotator, accepted),
+                INDEX idx_ai_events_created (created_at, model)
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
             """
         )

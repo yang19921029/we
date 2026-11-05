@@ -78,6 +78,28 @@ export type DatasetRecord = {
   created_at: string
   project_id: number
   project_name: string
+  latest_version: number | null
+}
+
+export type DatasetVersion = {
+  id: number
+  version: number
+  imported_count: number
+  status: string
+  source_name: string
+  created_by: string
+  created_at: string
+}
+
+export type ExportHistoryRecord = {
+  id: number
+  dataset_id: number | null
+  label_status: string
+  export_format: 'csv' | 'jsonl'
+  status: string
+  item_count: number
+  created_at: string
+  completed_at: string | null
 }
 
 export type OrganizationRecord = {
@@ -124,6 +146,7 @@ export type AnnotationTask = {
   project_name: string
   label_schema_id: number
   label_schema_name: string
+  dataset_version: number | null
   assignee: string
   priority: '高' | '中' | '低'
   status: string
@@ -196,6 +219,24 @@ export type QualityRule = {
   name: string
   enabled: boolean
   threshold: number | null
+}
+
+export type AIEvaluationSummary = {
+  evaluated_count: number
+  accepted_count: number
+  acceptance_rate: number
+  by_model: Array<{
+    model: string
+    evaluated_count: number
+    accepted_count: number
+  }>
+}
+
+export type QualityTrend = {
+  month: string
+  approved: number
+  returned: number
+  total: number
 }
 
 export type AnnotationIssue = {
@@ -381,6 +422,19 @@ export function getDatasets(signal?: AbortSignal): Promise<DatasetRecord[]> {
   return request('/datasets', { signal })
 }
 
+export function getDatasetVersions(
+  datasetId: number,
+  signal?: AbortSignal,
+): Promise<DatasetVersion[]> {
+  return request(`/datasets/${datasetId}/versions`, { signal })
+}
+
+export function getExportHistory(
+  signal?: AbortSignal,
+): Promise<{ items: ExportHistoryRecord[]; total: number; page: number; page_size: number }> {
+  return request('/exports/history?page_size=20', { signal })
+}
+
 export function getOrganizations(signal?: AbortSignal): Promise<OrganizationRecord[]> {
   return request('/organizations', { signal })
 }
@@ -447,7 +501,7 @@ export function createDataset(
 export function importDatasetFile(
   datasetId: number,
   file: File,
-): Promise<{ dataset_id: number; imported_count: number }> {
+): Promise<{ dataset_id: number; imported_count: number; dataset_version: number | null }> {
   const body = new FormData()
   body.set('file', file)
   return request(`/datasets/${datasetId}/import`, { method: 'POST', body })
@@ -744,6 +798,18 @@ export function saveQualityRules(rules: QualityRule[]): Promise<QualityRule[]> {
     method: 'PUT',
     body: JSON.stringify({ rules }),
   })
+}
+
+export function getAIEvaluation(signal?: AbortSignal): Promise<AIEvaluationSummary> {
+  return request('/ai-evaluation', { signal })
+}
+
+export function getQualityTrends(
+  datasetId?: number,
+  signal?: AbortSignal,
+): Promise<QualityTrend[]> {
+  const query = datasetId === undefined ? '' : `?dataset_id=${datasetId}`
+  return request(`/quality-trends${query}`, { signal })
 }
 
 export function getAnnotationIssues(

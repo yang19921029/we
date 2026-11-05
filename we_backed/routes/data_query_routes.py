@@ -36,6 +36,7 @@ def register_data_query_routes(app):
     @login_required
     @role_required("超级管理员", "项目管理员", "数据分析员")
     def export_data_items():
+        db = app_module.get_db()
         export_format = request.args.get("format", "jsonl")
         if export_format not in {"jsonl", "csv"}:
             return jsonify(code=400, message="仅支持 jsonl 或 csv 格式。", data=None), 400
@@ -53,6 +54,7 @@ def register_data_query_routes(app):
         elif status in DATA_LABELS:
             filters.append({"term": {"label.keyword": status}})
         dataset_id_raw = request.args.get("dataset_id")
+        dataset_id = None
         if dataset_id_raw:
             try:
                 dataset_id = int(dataset_id_raw)
@@ -77,6 +79,17 @@ def register_data_query_routes(app):
             else:
                 filters.append({"term": {"dataset_id": dataset_id}})
         query = {"bool": {"filter": filters}} if filters else {"match_all": {}}
+        with db.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO export_history
+                    (created_by, dataset_id, label_status, export_format, status)
+                VALUES (%s, %s, %s, %s, '生成中')
+                """,
+                (session["username"], dataset_id, status, export_format),
+            )
+            export_id = cursor.lastrowid
+        db.commit()
         client = None
         try:
             client = app_module.create_es_client()
@@ -90,6 +103,16 @@ def register_data_query_routes(app):
         except (ApiError, TransportError, RuntimeError, ValueError) as error:
             if client is not None:
                 client.close()
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE export_history
+                    SET status = '失败', completed_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND created_by = %s
+                    """,
+                    (export_id, session["username"]),
+                )
+            db.commit()
             return elastic_error_response(error)
 
         fieldnames = [
@@ -104,6 +127,8 @@ def register_data_query_routes(app):
         def generate_export():
             nonlocal response
             scroll_id = response.get("_scroll_id")
+            item_count = 0
+            terminal_status_written = False
             try:
                 if export_format == "csv":
                     stream = io.StringIO(newline="")
@@ -116,6 +141,7 @@ def register_data_query_routes(app):
                         break
                     for hit in hits:
                         item = get_data_item(hit)
+                        item_count += 1
                         if export_format == "jsonl":
                             yield json.dumps(item, ensure_ascii=False) + "\n"
                         else:
@@ -129,8 +155,46 @@ def register_data_query_routes(app):
                         break
                     response = client.scroll(scroll_id=scroll_id, scroll="2m")
                     scroll_id = response.get("_scroll_id", scroll_id)
+                with db.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE export_history
+                        SET status = '已完成', item_count = %s,
+                            completed_at = CURRENT_TIMESTAMP
+                        WHERE id = %s AND created_by = %s
+                        """,
+                        (item_count, export_id, session["username"]),
+                    )
+                db.commit()
+                terminal_status_written = True
+            except (ApiError, TransportError, RuntimeError, ValueError):
+                with db.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE export_history
+                        SET status = '失败', item_count = %s,
+                            completed_at = CURRENT_TIMESTAMP
+                        WHERE id = %s AND created_by = %s
+                        """,
+                        (item_count, export_id, session["username"]),
+                    )
+                db.commit()
+                terminal_status_written = True
+                raise
             finally:
                 try:
+                    if not terminal_status_written:
+                        with db.cursor() as cursor:
+                            cursor.execute(
+                                """
+                                UPDATE export_history
+                                SET status = '失败', item_count = %s,
+                                    completed_at = CURRENT_TIMESTAMP
+                                WHERE id = %s AND created_by = %s
+                                """,
+                                (item_count, export_id, session["username"]),
+                            )
+                        db.commit()
                     if scroll_id:
                         client.clear_scroll(scroll_id=scroll_id)
                 except (ApiError, TransportError, RuntimeError, ValueError):
@@ -150,6 +214,40 @@ def register_data_query_routes(app):
             headers={
                 "Content-Disposition": f'attachment; filename="data-items.{export_format}"'
             },
+        )
+
+    @app.get("/api/exports/history")
+    @login_required
+    @role_required("超级管理员", "项目管理员", "数据分析员")
+    def list_export_history():
+        try:
+            page = int(request.args.get("page", "1"))
+            page_size = int(request.args.get("page_size", "20"))
+        except ValueError:
+            return jsonify(code=400, message="分页参数必须是整数。", data=None), 400
+        if page < 1 or not 1 <= page_size <= 100:
+            return jsonify(code=400, message="分页参数无效。", data=None), 400
+        with app_module.get_db().cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) AS total FROM export_history WHERE created_by = %s",
+                (session["username"],),
+            )
+            total = cursor.fetchone()["total"]
+            cursor.execute(
+                """
+                SELECT id, dataset_id, label_status, export_format, status,
+                    item_count, created_at, completed_at
+                FROM export_history WHERE created_by = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s OFFSET %s
+                """,
+                (session["username"], page_size, (page - 1) * page_size),
+            )
+            items = [dict(row) for row in cursor.fetchall()]
+        return jsonify(
+            code=0,
+            message="ok",
+            data={"items": items, "total": total, "page": page, "page_size": page_size},
         )
 
     @app.get("/api/data-items")

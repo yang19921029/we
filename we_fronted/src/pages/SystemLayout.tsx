@@ -505,7 +505,7 @@ export default function SystemLayout({
               ) : route === '/analytics' ? (
                 <StatisticsPage onSessionExpired={onSessionExpired} />
               ) : route === '/data/export' ? (
-                <DataExportPage />
+                <DataExportPage onSessionExpired={onSessionExpired} />
               ) : route === '/users' ? (
                 <UserManagementPage onSessionExpired={onSessionExpired} />
               ) : route === '/audit-logs' ? (

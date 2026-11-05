@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   getAnnotationIssues,
+  getAIEvaluation,
+  getQualityTrends,
   getQualityRules,
   getReviewItems,
   saveQualityRules,
   updateAnnotationIssue,
   type AnnotationIssue,
+  type AIEvaluationSummary,
   type DataItem,
+  type QualityTrend,
   type QualityRule,
   type ReviewItem,
 } from '../../api'
@@ -49,6 +53,13 @@ export function QualityManagementPage({
     approved: EMPTY_REVIEW,
     returned: EMPTY_REVIEW,
   })
+  const [aiEvaluation, setAiEvaluation] = useState<AIEvaluationSummary>({
+    evaluated_count: 0,
+    accepted_count: 0,
+    acceptance_rate: 0,
+    by_model: [],
+  })
+  const [qualityTrends, setQualityTrends] = useState<QualityTrend[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [selectedTab, setSelectedTab] = useState<'rules' | 'report' | 'issues'>(
@@ -67,12 +78,16 @@ export function QualityManagementPage({
     setLoading(true)
     setError('')
     try {
-      const [pending, approved, returned] = await Promise.all([
+      const [pending, approved, returned, evaluation, trends] = await Promise.all([
         getReviewItems('pending', { pageSize: 1 }),
         getReviewItems('approved', { pageSize: 100 }),
         getReviewItems('returned', { pageSize: 100 }),
+        getAIEvaluation(),
+        getQualityTrends(),
       ])
       setSummary({ pending, approved, returned })
+      setAiEvaluation(evaluation)
+      setQualityTrends(trends)
     } catch (cause) {
       setError(handlePageError(cause, onSessionExpired, '质检报告加载失败。'))
     } finally {
@@ -409,7 +424,49 @@ export function QualityManagementPage({
                   <span>通过率</span>
                   <strong>{passRate}%</strong>
                 </article>
+                <article>
+                  <span>AI 建议采纳</span>
+                  <strong>{aiEvaluation.accepted_count} / {aiEvaluation.evaluated_count}</strong>
+                </article>
+                <article>
+                  <span>AI 采纳率</span>
+                  <strong>{(aiEvaluation.acceptance_rate * 100).toFixed(1)}%</strong>
+                </article>
               </div>
+              <section className="platform-table-card">
+                <div className="section-title-row">
+                  <div>
+                    <h2>月度审核趋势</h2>
+                    <p>按审核完成时间统计通过与退回记录。</p>
+                  </div>
+                </div>
+                {qualityTrends.length === 0 ? (
+                  <p className="data-empty">暂无月度审核数据。</p>
+                ) : (
+                  <div className="data-table-wrap">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th scope="col">月份</th>
+                          <th scope="col">审核数</th>
+                          <th scope="col">通过</th>
+                          <th scope="col">退回</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {qualityTrends.map((trend) => (
+                          <tr key={trend.month}>
+                            <td>{trend.month}</td>
+                            <td>{trend.total}</td>
+                            <td>{trend.approved}</td>
+                            <td>{trend.returned}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
               <section className="platform-table-card">
                 <div className="section-title-row">
                   <div>

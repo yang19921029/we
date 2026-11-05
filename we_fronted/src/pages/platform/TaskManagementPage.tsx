@@ -353,7 +353,10 @@ export function TaskManagementPage({
                     </td>
                     <td>{task.name}</td>
                     <td>{task.project_name}</td>
-                    <td>{task.dataset_name} / {task.label_schema_name}</td>
+                    <td>
+                      {task.dataset_name} / {task.label_schema_name}
+                      {task.dataset_version ? `（数据集快照 v${task.dataset_version}）` : ''}
+                    </td>
                     <td>
                       {(() => {
                         const taskMembers = membersByProject[task.project_id] ?? []

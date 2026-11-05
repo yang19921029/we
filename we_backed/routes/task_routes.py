@@ -76,6 +76,8 @@ def register_task_routes(app):
                     SELECT t.id, t.name, t.dataset_id, d.name AS dataset_name,
                         d.project_id, p.name AS project_name,
                         t.label_schema_id, s.name AS label_schema_name,
+                        (SELECT dv.version FROM dataset_versions dv
+                         WHERE dv.id = t.dataset_version_id) AS dataset_version,
                         t.assignee, t.priority, t.status, t.deadline,
                         t.instructions, t.created_by, t.created_at,
                         (SELECT COUNT(*) FROM task_items i WHERE i.task_id = t.id)
@@ -100,6 +102,8 @@ def register_task_routes(app):
                     SELECT t.id, t.name, t.dataset_id, d.name AS dataset_name,
                         d.project_id, p.name AS project_name,
                         t.label_schema_id, s.name AS label_schema_name,
+                        (SELECT dv.version FROM dataset_versions dv
+                         WHERE dv.id = t.dataset_version_id) AS dataset_version,
                         t.assignee, t.priority, t.status, t.deadline,
                         t.instructions, t.created_by, t.created_at,
                         COUNT(i.item_id) AS total_items,
@@ -192,6 +196,14 @@ def register_task_routes(app):
                 return jsonify(code=400, message="所选标签体系不存在。", data=None), 400
             cursor.execute(
                 """
+                SELECT id, version FROM dataset_versions
+                WHERE dataset_id = %s ORDER BY version DESC LIMIT 1
+                """,
+                (dataset_id,),
+            )
+            dataset_version = cursor.fetchone()
+            cursor.execute(
+                """
                 SELECT u.id
                 FROM users u
                 JOIN project_members pm ON pm.user_id = u.id
@@ -245,8 +257,8 @@ def register_task_routes(app):
                 """
                 INSERT INTO annotation_tasks
                     (name, dataset_id, label_schema_id, assignee, priority,
-                     status, deadline, instructions, created_by)
-                VALUES (%s, %s, %s, %s, %s, '待标注', %s, %s, %s)
+                     status, deadline, instructions, created_by, dataset_version_id)
+                VALUES (%s, %s, %s, %s, %s, '待标注', %s, %s, %s, %s)
                 """,
                 (
                     name.strip(),
@@ -257,6 +269,7 @@ def register_task_routes(app):
                     deadline,
                     instructions.strip(),
                     session["username"],
+                    dataset_version["id"] if dataset_version else None,
                 ),
             )
             task_id = cursor.lastrowid
@@ -291,6 +304,7 @@ def register_task_routes(app):
                 "assignee": assignee.strip(),
                 "priority": priority,
                 "status": "待标注",
+                "dataset_version": dataset_version["version"] if dataset_version else None,
             },
         ), 201
 

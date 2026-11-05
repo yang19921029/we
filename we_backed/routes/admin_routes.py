@@ -666,6 +666,68 @@ def register_admin_routes(app):
             },
         )
 
+    @app.get("/api/quality-trends")
+    @login_required
+    @role_required(*USER_ROLES - {"标注员", "数据分析员"})
+    def quality_trends():
+        dataset_id_raw = request.args.get("dataset_id")
+        filters = [{"exists": {"field": "reviewed_at"}}]
+        project_filter = scoped_dataset_filter(accessible_dataset_ids())
+        if project_filter:
+            filters.append(project_filter)
+        if dataset_id_raw:
+            try:
+                dataset_id = int(dataset_id_raw)
+            except ValueError:
+                return jsonify(code=400, message="dataset_id 必须是正整数。", data=None), 400
+            if dataset_id < 1:
+                return jsonify(code=400, message="dataset_id 必须是正整数。", data=None), 400
+            if not can_access_dataset(dataset_id):
+                return jsonify(code=403, message="无权查看该数据集的质检趋势。", data=None), 403
+            filters.append({"term": {"dataset_id": dataset_id}})
+        try:
+            response = app_module.get_es_client().search(
+                index=current_app.config["ELASTICSEARCH_INDEX"],
+                query={"bool": {"filter": filters}},
+                size=0,
+                aggregations={
+                    "monthly": {
+                        "date_histogram": {
+                            "field": "reviewed_at",
+                            "calendar_interval": "month",
+                            "format": "yyyy-MM",
+                            "min_doc_count": 0,
+                        },
+                        "aggs": {
+                            "decisions": {
+                                "terms": {
+                                    "field": "review_status.keyword",
+                                    "size": 2,
+                                }
+                            }
+                        },
+                    }
+                },
+            )
+        except (ApiError, TransportError, RuntimeError, ValueError) as error:
+            return elastic_error_response(error)
+        buckets = response.get("aggregations", {}).get("monthly", {}).get("buckets", [])
+        trends = []
+        for bucket in buckets:
+            decisions = {
+                decision["key"]: decision["doc_count"]
+                for decision in bucket.get("decisions", {}).get("buckets", [])
+            }
+            trends.append(
+                {
+                    "month": bucket.get("key_as_string"),
+                    "approved": decisions.get("approved", 0),
+                    "returned": decisions.get("returned", 0),
+                    "total": bucket["doc_count"],
+                }
+            )
+        return jsonify(code=0, message="ok", data=trends)
+
     @app.get("/api/data-items/<path:item_id>/quality-check")
     @login_required
     @role_required("超级管理员", "项目管理员", "任务负责人", "审核员")

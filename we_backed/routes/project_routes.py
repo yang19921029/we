@@ -389,7 +389,9 @@ def register_project_routes(app):
                 cursor.execute(
                     """
                     SELECT d.id, d.name, d.description, d.record_count, d.created_by,
-                        d.created_at, d.project_id, p.name AS project_name
+                        d.created_at, d.project_id, p.name AS project_name,
+                        (SELECT MAX(dv.version) FROM dataset_versions dv
+                         WHERE dv.dataset_id = d.id) AS latest_version
                     FROM datasets d JOIN projects p ON p.id = d.project_id
                     ORDER BY d.id
                     """
@@ -398,7 +400,9 @@ def register_project_routes(app):
                 cursor.execute(
                     """
                     SELECT d.id, d.name, d.description, d.record_count, d.created_by,
-                        d.created_at, d.project_id, p.name AS project_name
+                        d.created_at, d.project_id, p.name AS project_name,
+                        (SELECT MAX(dv.version) FROM dataset_versions dv
+                         WHERE dv.dataset_id = d.id) AS latest_version
                     FROM datasets d
                     JOIN projects p ON p.id = d.project_id
                     JOIN project_members pm ON pm.project_id = d.project_id
@@ -409,6 +413,24 @@ def register_project_routes(app):
                 )
             rows = cursor.fetchall()
         return jsonify(code=0, message="ok", data=[dict(row) for row in rows])
+
+    @app.get("/api/datasets/<int:dataset_id>/versions")
+    @login_required
+    def list_dataset_versions(dataset_id: int):
+        if not can_access_dataset(dataset_id):
+            return jsonify(code=403, message="无权访问该数据集。", data=None), 403
+        with app_module.get_db().cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, version, imported_count, status, source_name,
+                    created_by, created_at
+                FROM dataset_versions WHERE dataset_id = %s
+                ORDER BY version DESC
+                """,
+                (dataset_id,),
+            )
+            versions = [dict(row) for row in cursor.fetchall()]
+        return jsonify(code=0, message="ok", data=versions)
 
     @app.post("/api/datasets")
     @login_required
@@ -635,11 +657,38 @@ def register_project_routes(app):
                 dedupe_db.close()
 
         db = app_module.get_db()
+        dataset_version = None
         if indexed:
             with db.cursor() as cursor:
                 cursor.execute(
+                    "SELECT id FROM datasets WHERE id = %s FOR UPDATE",
+                    (dataset_id,),
+                )
+                cursor.fetchone()
+                cursor.execute(
+                    "SELECT COALESCE(MAX(version), 0) AS current_version "
+                    "FROM dataset_versions WHERE dataset_id = %s",
+                    (dataset_id,),
+                )
+                dataset_version = cursor.fetchone()["current_version"] + 1
+                cursor.execute(
                     "UPDATE datasets SET record_count = record_count + %s WHERE id = %s",
                     (indexed, dataset_id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO dataset_versions
+                        (dataset_id, version, imported_count, status, source_name, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        dataset_id,
+                        dataset_version,
+                        indexed,
+                        "部分失败" if failed_records or import_error else "已完成",
+                        filename[:255],
+                        session["username"],
+                    ),
                 )
         write_audit_log(
             "导入数据",
@@ -649,6 +698,7 @@ def register_project_routes(app):
                 "imported_count": indexed,
                 "failed_count": failed_records,
                 "skipped_duplicate_count": skipped_duplicates,
+                "dataset_version": dataset_version,
             },
         )
         db.commit()
@@ -673,6 +723,7 @@ def register_project_routes(app):
                         "imported_count": indexed,
                         "failed_count": failed_records,
                         "skipped_duplicate_count": skipped_duplicates,
+                        "dataset_version": dataset_version,
                     },
                 ), 503
             return elastic_error_response(import_error)
@@ -701,5 +752,6 @@ def register_project_routes(app):
                 "dataset_id": dataset_id,
                 "imported_count": indexed,
                 "skipped_duplicate_count": skipped_duplicates,
+                "dataset_version": dataset_version,
             },
         )

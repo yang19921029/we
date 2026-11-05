@@ -32,7 +32,85 @@ class FakeCursor:
 
     def execute(self, query, params=()):
         self.database.last_query = query
-        if "INSERT INTO active_sessions" in query:
+        if "INSERT INTO export_history" in query:
+            created_by, dataset_id, label_status, export_format = params
+            export_id = len(self.database.exports) + 1
+            self.database.exports.append(
+                {
+                    "id": export_id,
+                    "created_by": created_by,
+                    "dataset_id": dataset_id,
+                    "label_status": label_status,
+                    "export_format": export_format,
+                    "status": "生成中",
+                    "item_count": 0,
+                    "created_at": "2026-10-30",
+                    "completed_at": None,
+                }
+            )
+            self.lastrowid = export_id
+            self.result = None
+        elif "UPDATE export_history" in query:
+            if "status = '已完成'" in query:
+                status, item_count, export_id, created_by = ("已完成", *params)
+            elif len(params) == 2:
+                status, item_count, export_id, created_by = ("失败", 0, *params)
+            else:
+                status, item_count, export_id, created_by = ("失败", *params)
+            export = next(
+                (
+                    row for row in self.database.exports
+                    if row["id"] == export_id and row["created_by"] == created_by
+                ),
+                None,
+            )
+            if export:
+                export.update(
+                    status=status,
+                    item_count=item_count,
+                    completed_at="2026-10-30",
+                )
+            self.result = None
+        elif "INSERT INTO ai_preannotation_events" in query:
+            task_id, item_id, annotator, model, suggested_label, confidence = params
+            event_id = len(self.database.ai_events) + 1
+            self.database.ai_events.append(
+                {
+                    "id": event_id,
+                    "task_id": task_id,
+                    "item_id": item_id,
+                    "annotator": annotator,
+                    "model": model,
+                    "suggested_label": suggested_label,
+                    "confidence": confidence,
+                    "accepted": None,
+                    "final_label": None,
+                }
+            )
+            self.lastrowid = event_id
+            self.result = None
+        elif "SELECT id, suggested_label FROM ai_preannotation_events" in query:
+            self.result = next(
+                (
+                    dict(event)
+                    for event in reversed(self.database.ai_events)
+                    if event["task_id"] == params[0]
+                    and event["item_id"] == params[1]
+                    and event["annotator"] == params[2]
+                    and event["accepted"] is None
+                ),
+                None,
+            )
+        elif "UPDATE ai_preannotation_events" in query and "SET accepted" in query:
+            accepted, final_label, event_id = params
+            event = next(
+                (event for event in self.database.ai_events if event["id"] == event_id),
+                None,
+            )
+            if event:
+                event.update(accepted=accepted, final_label=final_label)
+            self.result = None
+        elif "INSERT INTO active_sessions" in query:
             session_id, user_id, auth_version = params
             self.database.active_sessions[session_id] = {
                 "session_id": session_id,
@@ -41,6 +119,20 @@ class FakeCursor:
                 "last_seen_at": datetime.now(timezone.utc).replace(tzinfo=None),
             }
             self.result = None
+        elif "FROM export_history" in query:
+            if "COUNT(*) AS total" in query:
+                self.result = {
+                    "total": sum(
+                        export["created_by"] == params[0]
+                        for export in self.database.exports
+                    )
+                }
+            else:
+                self.result = [
+                    {key: value for key, value in export.items() if key != "created_by"}
+                    for export in self.database.exports
+                    if export["created_by"] == params[0]
+                ]
         elif "UPDATE active_sessions SET auth_version = %s" in query:
             auth_version, session_id, user_id = params
             active_session = self.database.active_sessions.get(session_id)
@@ -253,6 +345,12 @@ class FakeCursor:
                 self.result = dict(self.database.users[7])
             else:
                 self.result = None
+        elif "SELECT dataset_id, label_schema_id, assignee, status" in query:
+            task_id = params[0]
+            self.result = next(
+                (dict(task) for task in self.database.tasks if task.get("id") == task_id),
+                None,
+            )
         elif "UPDATE annotation_tasks SET assignee" in query:
             assignee, task_id = params
             for task in self.database.tasks:
@@ -308,12 +406,29 @@ class FakeCursor:
                 if item["item_id"] == item_id:
                     item["status"] = status
             self.result = None
+        elif (
+            "UPDATE task_items SET status = %s" in query
+            and "WHERE task_id = %s AND item_id = %s" in query
+        ):
+            status, task_id, item_id = params
+            for item in self.database.task_items:
+                if item["task_id"] == task_id and item["item_id"] == item_id:
+                    item["status"] = status
+            self.result = None
+        elif "SELECT COUNT(*) AS awaiting_review" in query:
+            task_id = params[0]
+            self.result = {
+                "awaiting_review": sum(
+                    item["task_id"] == task_id and item["status"] == "已标注"
+                    for item in self.database.task_items
+                )
+            }
         elif "SELECT COUNT(*) AS remaining" in query and "task_items" in query:
             task_id = params[0]
             self.result = {
                 "remaining": sum(
                     item["task_id"] == task_id
-                    and item["status"] not in {"已审核", "已跳过"}
+                    and item["status"] not in {"已标注", "已审核", "已跳过"}
                     for item in self.database.task_items
                 )
             }
@@ -366,6 +481,38 @@ class FakeCursor:
             rule = next(rule for rule in self.database.quality_rules if rule["rule_key"] == rule_key)
             rule.update(enabled=enabled, threshold=threshold)
             self.result = None
+        elif "FROM ai_preannotation_events" in query and "COUNT(*) AS evaluated_count" in query:
+            events = [event for event in self.database.ai_events if event["accepted"] is not None]
+            if "d.project_id IN" in query:
+                project_ids = set(params)
+                events = [
+                    event
+                    for event in events
+                    if self.database.dataset_projects.get(
+                        next(
+                            (
+                                task.get("dataset_id", 1)
+                                for task in self.database.tasks
+                                if task.get("id") == event["task_id"]
+                            ),
+                            1,
+                        ),
+                        1,
+                    )
+                    in project_ids
+                ]
+            if "GROUP BY e.model" in query:
+                grouped = {}
+                for event in events:
+                    group = grouped.setdefault(event["model"], {"model": event["model"], "evaluated_count": 0, "accepted_count": 0})
+                    group["evaluated_count"] += 1
+                    group["accepted_count"] += event["accepted"]
+                self.result = list(grouped.values())
+            else:
+                self.result = {
+                    "evaluated_count": len(events),
+                    "accepted_count": sum(event["accepted"] for event in events),
+                }
         elif "FROM annotation_issues" in query:
             if "COUNT(*) AS total" in query:
                 self.result = {"total": len(self.database.issues)}
@@ -428,6 +575,49 @@ class FakeCursor:
                 else None
             )
         elif "UPDATE datasets SET record_count = record_count +" in query:
+            self.result = None
+        elif "SELECT COALESCE(MAX(version), 0) AS current_version FROM dataset_versions" in query:
+            versions = [
+                version["version"]
+                for version in self.database.dataset_versions
+                if version["dataset_id"] == params[0]
+            ]
+            self.result = {"current_version": max(versions, default=0)}
+        elif (
+            "FROM dataset_versions" in query
+            and "SELECT id, version, imported_count" not in query
+            and "SELECT id, version" in query
+        ):
+            versions = [
+                version
+                for version in self.database.dataset_versions
+                if version["dataset_id"] == params[0]
+            ]
+            self.result = (
+                dict(max(versions, key=lambda version: version["version"]))
+                if versions
+                else None
+            )
+        elif "FROM dataset_versions" in query and "SELECT id, version, imported_count" in query:
+            self.result = [
+                dict(version)
+                for version in self.database.dataset_versions
+                if version["dataset_id"] == params[0]
+            ]
+        elif "INSERT INTO dataset_versions" in query:
+            dataset_id, version, imported_count, status, source_name, created_by = params
+            version_id = len(self.database.dataset_versions) + 1
+            self.database.dataset_versions.append(
+                {
+                    "id": version_id,
+                    "dataset_id": dataset_id,
+                    "version": version,
+                    "imported_count": imported_count,
+                    "status": status,
+                    "source_name": source_name,
+                    "created_by": created_by,
+                }
+            )
             self.result = None
         elif "SELECT project_id FROM project_members" in query:
             self.result = [
@@ -660,6 +850,9 @@ class FakeDatabase:
         self.member_relations = set()
         self.tasks = []
         self.task_items = []
+        self.dataset_versions = []
+        self.exports = []
+        self.ai_events = []
         self.issues = []
         self.notifications = []
         self.quality_rules = [
@@ -1186,7 +1379,11 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["data"]["imported_count"], 5001)
+        self.assertEqual(response.json["data"]["dataset_version"], 1)
         self.assertEqual(len(self.elastic.indexed_documents), 5001)
+        versions = self.client.get("/api/datasets/2/versions")
+        self.assertEqual(versions.status_code, 200)
+        self.assertEqual(versions.json["data"][0]["imported_count"], 5001)
         self.assertEqual(len(self.elastic.bulk_requests), 51)
         self.assertTrue(
             all(len(operations) <= 200 for operations, _ in self.elastic.bulk_requests)
@@ -1671,6 +1868,24 @@ class ApiTestCase(unittest.TestCase):
 
     def test_ai_preannotation_masks_sensitive_text_before_external_request(self):
         self.database.member_project_ids.add(1)
+        self.database.member_relations.add((1, 7))
+        self.database.tasks.append(
+            {
+                "id": 9,
+                "dataset_id": 1,
+                "label_schema_id": 1,
+                "assignee": "tester",
+                "status": "标注中",
+            }
+        )
+        self.database.task_items.append(
+            {
+                "task_id": 9,
+                "item_id": "doc-1",
+                "assignee": "tester",
+                "status": "待标注",
+            }
+        )
         self.elastic.items["doc-1"].update(
             {
                 "dataset_id": 1,
@@ -1726,6 +1941,36 @@ class ApiTestCase(unittest.TestCase):
         self.assertNotIn("13812345678", outbound_request.data.decode("utf-8"))
         self.assertNotIn("person@example.com", outbound_request.data.decode("utf-8"))
         self.assertIsNone(self.elastic.items["doc-1"].get("label"))
+        label_response = self.client.put(
+            "/api/data-items/doc-1/label",
+            json={"label": "正向", "task_id": 9},
+        )
+        self.assertEqual(label_response.status_code, 200)
+        self.assertEqual(self.database.ai_events[0]["accepted"], 1)
+        self.database.tasks.append(
+            {"id": 10, "dataset_id": 2, "label_schema_id": 1}
+        )
+        self.database.ai_events.append(
+            {
+                "id": 2,
+                "task_id": 10,
+                "item_id": "other-project-item",
+                "annotator": "someone-else",
+                "model": "other-model",
+                "suggested_label": "负向",
+                "confidence": 0.8,
+                "accepted": 0,
+                "final_label": "正向",
+            }
+        )
+        with self.client.session_transaction() as session:
+            self.database.users[7]["role"] = "任务负责人"
+            session["role"] = "任务负责人"
+        evaluation = self.client.get("/api/ai-evaluation")
+        self.assertEqual(evaluation.status_code, 200)
+        self.assertEqual(evaluation.json["data"]["evaluated_count"], 1)
+        self.assertEqual(evaluation.json["data"]["accepted_count"], 1)
+        self.assertEqual(evaluation.json["data"]["acceptance_rate"], 1)
 
     def test_quality_duplicate_search_is_limited_to_the_same_dataset(self):
         self.client.post(
@@ -2355,6 +2600,47 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(json.loads(exported_items[0])["id"], "0")
         self.assertEqual(json.loads(exported_items[-1])["id"], "10000")
         self.assertNotIn("scroll-1", self.elastic.scroll_hits)
+        history = self.client.get("/api/exports/history")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.json["data"]["items"][0]["status"], "已完成")
+        self.assertEqual(history.json["data"]["items"][0]["item_count"], 10001)
+
+    def test_export_history_marks_cancelled_download_as_failed(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        self.elastic.items = {
+            "first": {"content": "first"},
+            "second": {"content": "second"},
+        }
+
+        response = self.client.get(
+            "/api/data-items/export?format=jsonl",
+            buffered=False,
+        )
+        next(response.response)
+        response.close()
+
+        history = self.client.get("/api/exports/history")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.json["data"]["items"][0]["status"], "失败")
+        self.assertEqual(history.json["data"]["items"][0]["item_count"], 1)
+
+    def test_quality_trends_use_review_aggregation_and_return_monthly_shape(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+
+        response = self.client.get("/api/quality-trends")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["data"], [])
+        self.assertIn(
+            {"exists": {"field": "reviewed_at"}},
+            self.elastic.search_queries[-1]["bool"]["filter"],
+        )
 
     def test_label_endpoint_rejects_invalid_label_and_unknown_item(self):
         self.client.post(

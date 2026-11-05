@@ -1,23 +1,48 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   getDatasets,
+  getExportHistory,
   type DatasetRecord,
+  type ExportHistoryRecord,
 } from '../../api'
 import { PageTitle } from './PlatformShared'
+import { formatDate } from '../../dateFormat'
+import { handlePageError } from '../pageErrors'
 
-export function DataExportPage() {
+export function DataExportPage({
+  onSessionExpired,
+}: {
+  onSessionExpired: () => void
+}) {
   const [format, setFormat] = useState<'jsonl' | 'csv'>('jsonl')
   const [labelStatus, setLabelStatus] = useState('all')
   const [datasets, setDatasets] = useState<DatasetRecord[]>([])
   const [datasetId, setDatasetId] = useState('')
   const [error, setError] = useState('')
+  const [history, setHistory] = useState<ExportHistoryRecord[]>([])
+  const [historyLoading, setHistoryLoading] = useState(true)
   const query = new URLSearchParams({ format, label_status: labelStatus })
   if (datasetId) query.set('dataset_id', datasetId)
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true)
+    setError('')
+    try {
+      setHistory((await getExportHistory()).items)
+    } catch (cause) {
+      setError(handlePageError(cause, onSessionExpired, '导出历史加载失败。'))
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [onSessionExpired])
+
   useEffect(() => {
     void getDatasets()
       .then(setDatasets)
-      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : '数据集加载失败。'))
-  }, [])
+      .catch((cause: unknown) => setError(
+        handlePageError(cause, onSessionExpired, '数据集加载失败。'),
+      ))
+    void loadHistory()
+  }, [loadHistory, onSessionExpired])
   return (
     <>
       <PageTitle
@@ -55,6 +80,60 @@ export function DataExportPage() {
           下载标注数据
         </a>
         {error && <p className="platform-error" role="alert">{error}</p>}
+      </section>
+      <section className="platform-table-card">
+        <div className="section-title-row">
+          <div>
+            <h2>导出历史</h2>
+            <p>仅显示当前账号发起的最近 20 次导出。</p>
+          </div>
+          <button
+            className="platform-secondary-button"
+            disabled={historyLoading}
+            onClick={() => void loadHistory()}
+            type="button"
+          >
+            刷新
+          </button>
+        </div>
+        {historyLoading ? (
+          <p className="api-message" role="status">正在加载导出历史…</p>
+        ) : history.length === 0 ? (
+          <p className="data-empty">暂无导出记录。</p>
+        ) : (
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th scope="col">发起时间</th>
+                  <th scope="col">数据集</th>
+                  <th scope="col">筛选条件</th>
+                  <th scope="col">格式</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">记录数</th>
+                  <th scope="col">完成时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((entry) => (
+                  <tr key={entry.id}>
+                    <td>{formatDate(entry.created_at)}</td>
+                    <td>
+                      {entry.dataset_id
+                        ? datasets.find((dataset) => dataset.id === entry.dataset_id)?.name ?? `#${entry.dataset_id}`
+                        : '全部可访问数据'}
+                    </td>
+                    <td>{entry.label_status}</td>
+                    <td>{entry.export_format.toUpperCase()}</td>
+                    <td>{entry.status}</td>
+                    <td>{entry.item_count}</td>
+                    <td>{formatDate(entry.completed_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
     </>
   )

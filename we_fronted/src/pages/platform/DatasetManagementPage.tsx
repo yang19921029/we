@@ -2,11 +2,13 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import {
   createDataset,
   getDatasets,
+  getDatasetVersions,
   getProjects,
   importDatasetFile,
   previewDatasetFile,
   type DatasetImportPreview,
   type DatasetRecord,
+  type DatasetVersion,
   type ProjectRecord,
 } from '../../api'
 import { PageTitle } from './PlatformShared'
@@ -32,6 +34,9 @@ export function DatasetManagementPage({
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [dialog, setDialog] = useState<'create' | 'import' | null>(null)
+  const [versionDataset, setVersionDataset] = useState<DatasetRecord | null>(null)
+  const [datasetVersions, setDatasetVersions] = useState<DatasetVersion[]>([])
+  const [isLoadingVersions, setIsLoadingVersions] = useState(false)
 
   const loadDatasets = useCallback(async () => {
     setIsLoading(true)
@@ -87,7 +92,11 @@ export function DatasetManagementPage({
     setStatus('')
     try {
       const result = await importDatasetFile(Number(datasetId), file)
-      setStatus(`成功导入 ${result.imported_count} 条记录。`)
+      setStatus(
+        `成功导入 ${result.imported_count} 条记录。${
+          result.dataset_version ? ` 数据集版本已更新至 v${result.dataset_version}。` : ''
+        }`,
+      )
       setFile(null)
       setImportPreview(null)
       setDialog(null)
@@ -111,6 +120,20 @@ export function DatasetManagementPage({
       setError(handlePageError(cause, onSessionExpired, '文件预检失败。'))
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  async function showVersionHistory(dataset: DatasetRecord) {
+    setVersionDataset(dataset)
+    setIsLoadingVersions(true)
+    setError('')
+    try {
+      setDatasetVersions(await getDatasetVersions(dataset.id))
+    } catch (cause) {
+      setVersionDataset(null)
+      setError(handlePageError(cause, onSessionExpired, '数据集版本历史加载失败。'))
+    } finally {
+      setIsLoadingVersions(false)
     }
   }
 
@@ -170,8 +193,10 @@ export function DatasetManagementPage({
                   <th scope="col">项目</th>
                   <th scope="col">说明</th>
                   <th scope="col">记录数</th>
+                  <th scope="col">版本</th>
                   <th scope="col">创建人</th>
                   <th scope="col">创建时间</th>
+                  <th scope="col">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -181,8 +206,14 @@ export function DatasetManagementPage({
                     <td>{dataset.project_name}</td>
                     <td>{dataset.description || '—'}</td>
                     <td>{dataset.record_count}</td>
+                    <td>{dataset.latest_version ? `v${dataset.latest_version}` : '尚无导入版本'}</td>
                     <td>{dataset.created_by}</td>
                     <td>{formatDate(dataset.created_at)}</td>
+                    <td>
+                      <button className="text-link" onClick={() => void showVersionHistory(dataset)} type="button">
+                        版本历史
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -278,6 +309,43 @@ export function DatasetManagementPage({
                   {JSON.stringify(importPreview.preview, null, 2)}
                 </pre>
               </section>
+            )}
+            {versionDataset && (
+              <PlatformModal
+                onClose={() => setVersionDataset(null)}
+                title={`数据集「${versionDataset.name}」版本历史`}
+              >
+                {isLoadingVersions ? (
+                  <p className="api-message" role="status">正在加载版本历史…</p>
+                ) : datasetVersions.length === 0 ? (
+                  <p className="data-empty">该数据集还没有成功写入的导入版本。</p>
+                ) : (
+                  <div className="data-table-wrap">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th scope="col">版本</th>
+                          <th scope="col">写入数</th>
+                          <th scope="col">状态</th>
+                          <th scope="col">文件</th>
+                          <th scope="col">操作人 / 时间</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {datasetVersions.map((version) => (
+                          <tr key={version.id}>
+                            <td>v{version.version}</td>
+                            <td>{version.imported_count}</td>
+                            <td>{version.status}</td>
+                            <td>{version.source_name}</td>
+                            <td>{version.created_by} / {formatDate(version.created_at)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </PlatformModal>
             )}
             {error && <p className="platform-error" role="alert">{error}</p>}
             {!importPreview ? (

@@ -239,6 +239,26 @@ def register_annotation_routes(app):
             with db.cursor() as cursor:
                 cursor.execute(
                     """
+                    SELECT id, suggested_label FROM ai_preannotation_events
+                    WHERE task_id = %s AND item_id = %s AND annotator = %s
+                        AND accepted IS NULL
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (task_id, item_id, session["username"]),
+                )
+                ai_event = cursor.fetchone()
+                if ai_event is not None:
+                    cursor.execute(
+                        """
+                        UPDATE ai_preannotation_events
+                        SET accepted = %s, final_label = %s,
+                            evaluated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        """,
+                        (int(label == ai_event["suggested_label"]), label, ai_event["id"]),
+                    )
+                cursor.execute(
+                    """
                     UPDATE task_items SET status = %s
                     WHERE task_id = %s AND item_id = %s
                     """,
@@ -384,13 +404,30 @@ def register_annotation_routes(app):
         except AIServiceError as error:
             current_app.logger.warning("AI pre-annotation failed: %s", error)
             return jsonify(code=502, message=str(error), data=None), 502
+        db = app_module.get_db()
+        with db.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO ai_preannotation_events
+                    (task_id, item_id, annotator, model, suggested_label, confidence)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    task_id,
+                    item_id,
+                    session["username"],
+                    suggestion["model"],
+                    suggestion["label"],
+                    suggestion["confidence"],
+                ),
+            )
         write_audit_log(
             "AI 预标注",
             "数据",
             item_id,
             {"task_id": task_id, "model": suggestion["model"]},
         )
-        app_module.get_db().commit()
+        db.commit()
         return jsonify(
             code=0,
             message="AI 已生成建议，请人工确认后保存。",
