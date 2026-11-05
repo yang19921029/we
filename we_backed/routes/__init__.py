@@ -9,6 +9,7 @@ def register_routes(app):
     from .label_schema_routes import register_label_schema_routes
     from .project_routes import register_project_routes
     from .task_routes import register_task_routes
+    from .workflow_routes import register_workflow_routes
 
     register_auth_routes(app)
     register_project_routes(app)
@@ -17,3 +18,4 @@ def register_routes(app):
     register_admin_routes(app)
     register_data_query_routes(app)
     register_annotation_routes(app)
+    register_workflow_routes(app)

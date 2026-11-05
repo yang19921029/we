@@ -270,6 +270,65 @@ def init_db(get_db) -> None:
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
             """
         )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS annotation_issues (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                item_id VARCHAR(512) NOT NULL,
+                dataset_id INT NOT NULL,
+                project_id INT NOT NULL,
+                issue_type VARCHAR(32) NOT NULL,
+                description VARCHAR(500) NOT NULL,
+                reported_by VARCHAR(191) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT '待处理',
+                assignee VARCHAR(191) NULL,
+                resolution VARCHAR(1000) NOT NULL DEFAULT '',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_issues_project_status (project_id, status, created_at),
+                INDEX idx_issues_reporter (reported_by, created_at)
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quality_rules (
+                rule_key VARCHAR(64) NOT NULL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                enabled TINYINT(1) NOT NULL DEFAULT 1,
+                threshold INT NULL
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            """
+        )
+        cursor.executemany(
+            """
+            INSERT IGNORE INTO quality_rules (rule_key, name, enabled, threshold)
+            VALUES (%s, %s, 1, %s)
+            """,
+            [
+                ("empty_content", "内容完整性", None),
+                ("min_length", "内容长度", 3),
+                ("missing_label", "标注结果", None),
+                ("missing_annotator", "标注人信息", None),
+                ("duplicate_content", "数据集内重复内容", None),
+            ],
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notifications (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                recipient VARCHAR(191) NOT NULL,
+                title VARCHAR(191) NOT NULL,
+                body VARCHAR(500) NOT NULL,
+                link VARCHAR(512) NOT NULL DEFAULT '',
+                is_read TINYINT(1) NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_notifications_recipient_created
+                    (recipient, is_read, created_at)
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            """
+        )
         cursor.execute("SHOW INDEX FROM annotation_tasks")
         task_indexes = {row["Key_name"] for row in cursor.fetchall()}
         if "idx_tasks_created_id" not in task_indexes:

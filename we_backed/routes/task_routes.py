@@ -19,6 +19,7 @@ from app import (
     user_can_access_project,
     write_audit_log,
 )
+from .notification_helpers import add_notification
 
 
 def register_task_routes(app):
@@ -270,6 +271,14 @@ def register_task_routes(app):
                 ],
             )
         write_audit_log("创建", "标注任务", task_id, {"name": name.strip()})
+        with db.cursor() as cursor:
+            add_notification(
+                cursor,
+                assignee.strip(),
+                "已分配新标注任务",
+                f"任务“{name.strip()}”已分配给你。",
+                f"/data/label/{task_id}",
+            )
         db.commit()
         return jsonify(
             code=0,
@@ -370,9 +379,92 @@ def register_task_routes(app):
                     "UPDATE task_items SET assignee = %s WHERE task_id = %s",
                     (payload["assignee"].strip(), task_id),
                 )
+                add_notification(
+                    cursor,
+                    payload["assignee"].strip(),
+                    "标注任务已重新分配",
+                    f"任务 #{task_id} 已分配给你。",
+                    f"/data/label/{task_id}",
+                )
         write_audit_log("更新", "标注任务", task_id, payload)
         db.commit()
         return jsonify(code=0, message="任务已更新。", data={"id": task_id})
+
+    @app.post("/api/tasks/batch-assign")
+    @login_required
+    @role_required("超级管理员", "项目管理员", "任务负责人")
+    def batch_assign_tasks():
+        payload = request.get_json(silent=True)
+        task_ids = payload.get("task_ids") if isinstance(payload, dict) else None
+        assignee = payload.get("assignee") if isinstance(payload, dict) else None
+        if (
+            not isinstance(task_ids, list)
+            or not task_ids
+            or len(task_ids) > 100
+            or any(not isinstance(task_id, int) or isinstance(task_id, bool) or task_id < 1 for task_id in task_ids)
+            or len(set(task_ids)) != len(task_ids)
+        ):
+            return jsonify(code=400, message="任务 ID 列表必须包含 1 到 100 个不重复的正整数。", data=None), 400
+        if not isinstance(assignee, str) or not assignee.strip():
+            return jsonify(code=400, message="请选择有效负责人。", data=None), 400
+        db = app_module.get_db()
+        validated_tasks = []
+        with db.cursor() as cursor:
+            for task_id in task_ids:
+                cursor.execute(
+                    """
+                    SELECT t.id, t.name, d.project_id
+                    FROM annotation_tasks t
+                    JOIN datasets d ON d.id = t.dataset_id
+                    WHERE t.id = %s
+                    """,
+                    (task_id,),
+                )
+                task = cursor.fetchone()
+                if task is None:
+                    return jsonify(code=404, message=f"任务 {task_id} 不存在。", data=None), 404
+                if not user_can_access_project(task["project_id"]):
+                    return jsonify(code=403, message="所选任务中包含无权访问的项目。", data=None), 403
+                cursor.execute(
+                    """
+                    SELECT u.id FROM users u
+                    JOIN project_members pm ON pm.user_id = u.id
+                    WHERE u.username = %s AND u.is_active = 1
+                        AND pm.project_id = %s
+                    """,
+                    (assignee.strip(), task["project_id"]),
+                )
+                if cursor.fetchone() is None:
+                    return jsonify(code=400, message=f"负责人不是任务 {task_id} 所属项目的有效成员。", data=None), 400
+                validated_tasks.append(task)
+            for task in validated_tasks:
+                cursor.execute(
+                    "UPDATE annotation_tasks SET assignee = %s WHERE id = %s",
+                    (assignee.strip(), task["id"]),
+                )
+                cursor.execute(
+                    "UPDATE task_items SET assignee = %s WHERE task_id = %s",
+                    (assignee.strip(), task["id"]),
+                )
+                add_notification(
+                    cursor,
+                    assignee.strip(),
+                    "标注任务已重新分配",
+                    f"任务“{task['name']}”已分配给你。",
+                    f"/data/label/{task['id']}",
+                )
+        write_audit_log(
+            "批量分配",
+            "标注任务",
+            ",".join(str(task_id) for task_id in task_ids),
+            {"assignee": assignee.strip()},
+        )
+        db.commit()
+        return jsonify(
+            code=0,
+            message=f"已将 {len(task_ids)} 个任务分配给 {assignee.strip()}。",
+            data={"task_ids": task_ids, "assignee": assignee.strip()},
+        )
 
     @app.post("/api/tasks/<int:task_id>/auto-assign")
     @login_required
@@ -394,19 +486,26 @@ def register_task_routes(app):
                 return jsonify(code=404, message="标注任务不存在。", data=None), 404
             cursor.execute(
                 """
-                SELECT u.username, COUNT(t.id) AS active_tasks
+                SELECT u.username, COALESCE(SUM(
+                    CASE WHEN assigned_items.item_id IS NOT NULL THEN 1 ELSE 0 END
+                ), 0) AS active_items
                 FROM users u
                 JOIN project_members pm ON pm.user_id = u.id
-                LEFT JOIN annotation_tasks t
-                    ON t.assignee = u.username
-                    AND t.status IN ('待分配', '待标注', '标注中', '已退回')
+                LEFT JOIN (
+                    SELECT i.assignee, i.item_id
+                    FROM task_items i
+                    JOIN annotation_tasks active_task ON active_task.id = i.task_id
+                    WHERE i.status IN ('待标注', '已退回')
+                        AND active_task.status IN ('待分配', '待标注', '标注中', '已退回')
+                        AND i.task_id != %s
+                ) assigned_items ON assigned_items.assignee = u.username
                 WHERE u.role = '标注员' AND u.is_active = 1
                     AND pm.project_id = %s
                 GROUP BY u.id, u.username
-                ORDER BY active_tasks, u.username
+                ORDER BY active_items, u.username
                 LIMIT 1
                 """,
-                (task["project_id"],),
+                (task_id, task["project_id"]),
             )
             annotator = cursor.fetchone()
             if annotator is None:
@@ -426,6 +525,13 @@ def register_task_routes(app):
             cursor.execute(
                 "UPDATE task_items SET assignee = %s WHERE task_id = %s",
                 (annotator["username"], task_id),
+            )
+            add_notification(
+                cursor,
+                annotator["username"],
+                "已自动分配标注任务",
+                f"任务 #{task_id} 已分配给你。",
+                f"/data/label/{task_id}",
             )
         write_audit_log(
             "自动分配",

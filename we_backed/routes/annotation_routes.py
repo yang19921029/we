@@ -25,6 +25,7 @@ from app import (
     user_can_access_project,
     write_audit_log,
 )
+from .notification_helpers import add_notification
 
 
 def register_annotation_routes(app):
@@ -429,7 +430,8 @@ def register_annotation_routes(app):
                 index=current_app.config["ELASTICSEARCH_INDEX"],
                 id=item_id,
             )
-            if not can_access_data_source(document.get("_source") or {}):
+            source = document.get("_source") or {}
+            if not can_access_data_source(source):
                 return jsonify(code=403, message="无权提交该项目数据的反馈。", data=None), 403
             client.update(
                 index=current_app.config["ELASTICSEARCH_INDEX"],
@@ -454,4 +456,49 @@ def register_annotation_routes(app):
             return elastic_error_response(error)
         except (ApiError, TransportError, RuntimeError, ValueError) as error:
             return elastic_error_response(error)
+        dataset_id = source.get("dataset_id", 1)
+        db = app_module.get_db()
+        with db.cursor() as cursor:
+            cursor.execute(
+                "SELECT project_id FROM datasets WHERE id = %s",
+                (dataset_id,),
+            )
+            dataset = cursor.fetchone()
+            if dataset is None:
+                return jsonify(code=409, message="数据集不存在，无法创建异常记录。", data=None), 409
+            cursor.execute(
+                """
+                INSERT INTO annotation_issues
+                    (item_id, dataset_id, project_id, issue_type, description,
+                     reported_by)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    item_id,
+                    dataset_id,
+                    dataset["project_id"],
+                    issue_type,
+                    description.strip(),
+                    session["username"],
+                ),
+            )
+            issue_id = cursor.lastrowid
+            cursor.execute(
+                """
+                SELECT assignee FROM task_items
+                WHERE item_id = %s ORDER BY task_id DESC LIMIT 1
+                """,
+                (item_id,),
+            )
+            task_item = cursor.fetchone()
+            if task_item and task_item["assignee"] != session["username"]:
+                add_notification(
+                    cursor,
+                    task_item["assignee"],
+                    "收到新的数据异常反馈",
+                    f"数据 {item_id} 有新的异常反馈，请及时处理。",
+                    "/operations/complaints",
+                )
+        db.commit()
+        report["id"] = issue_id
         return jsonify(code=0, message="异常反馈已提交。", data=report)

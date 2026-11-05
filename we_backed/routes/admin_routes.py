@@ -28,6 +28,7 @@ from app import (
     user_can_access_project,
     write_audit_log,
 )
+from .notification_helpers import add_notification
 
 USER_ROLES = {
     "超级管理员",
@@ -601,10 +602,11 @@ def register_admin_routes(app):
         db = app_module.get_db()
         with db.cursor() as cursor:
             cursor.execute(
-                "SELECT task_id FROM task_items WHERE item_id = %s",
+                "SELECT task_id, assignee FROM task_items WHERE item_id = %s",
                 (item_id,),
             )
-            task_ids = [row["task_id"] for row in cursor.fetchall()]
+            task_items = cursor.fetchall()
+            task_ids = [row["task_id"] for row in task_items]
             if task_ids:
                 item_status = "已审核" if decision == "approved" else "已退回"
                 cursor.execute(
@@ -635,6 +637,22 @@ def register_admin_routes(app):
                                 """,
                                 (task_id,),
                             )
+                for assignee in {
+                    row.get("assignee")
+                    for row in task_items
+                    if row.get("assignee") and row["assignee"] != session["username"]
+                }:
+                    add_notification(
+                        cursor,
+                        assignee,
+                        "标注审核结果已更新",
+                        (
+                            f"数据 {item_id} 已通过审核。"
+                            if decision == "approved"
+                            else f"数据 {item_id} 已退回，请根据审核意见修改。"
+                        ),
+                        f"/data/label/{task_ids[0]['task_id']}",
+                    )
         db.commit()
         return jsonify(
             code=0,
@@ -652,6 +670,14 @@ def register_admin_routes(app):
     @login_required
     @role_required("超级管理员", "项目管理员", "任务负责人", "审核员")
     def quality_check_data_item(item_id: str):
+        with app_module.get_db().cursor() as cursor:
+            cursor.execute(
+                "SELECT rule_key, enabled, threshold FROM quality_rules"
+            )
+            rules = {
+                row["rule_key"]: row
+                for row in cursor.fetchall()
+            }
         client = app_module.get_es_client()
         try:
             response = client.get(
@@ -670,15 +696,26 @@ def register_admin_routes(app):
                 "",
             )
             warnings = []
-            if not content.strip():
+            if rules["empty_content"]["enabled"] and not content.strip():
                 warnings.append("数据内容为空。")
-            elif len(content.strip()) < 3:
-                warnings.append("数据内容过短，请确认是否完整。")
-            if not isinstance(source.get("label"), str) or not source["label"].strip():
+            elif (
+                rules["min_length"]["enabled"]
+                and len(content.strip()) < rules["min_length"]["threshold"]
+            ):
+                warnings.append(
+                    f"数据内容短于 {rules['min_length']['threshold']} 个字符，请确认是否完整。"
+                )
+            if rules["missing_label"]["enabled"] and (
+                not isinstance(source.get("label"), str) or not source["label"].strip()
+            ):
                 warnings.append("尚未设置标注结果。")
-            if isinstance(source.get("label"), str) and not source.get("labeled_by"):
+            if (
+                rules["missing_annotator"]["enabled"]
+                and isinstance(source.get("label"), str)
+                and not source.get("labeled_by")
+            ):
                 warnings.append("缺少标注人信息。")
-            if content.strip():
+            if rules["duplicate_content"]["enabled"] and content.strip():
                 duplicates = client.search(
                     index=current_app.config["ELASTICSEARCH_INDEX"],
                     query={

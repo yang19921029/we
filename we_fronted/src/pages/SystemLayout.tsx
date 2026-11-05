@@ -2,10 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import {
   ApiError,
   getMenuSections,
+  getNotifications,
+  markNotificationRead,
   updateOnlinePresence,
+  type AppNotification,
   type MenuSection,
 } from '../api'
 import { normalizePath, navigateTo } from '../routing'
+import { formatDate } from '../dateFormat'
 import DashboardPage from './DashboardPage'
 import {
   DataDetailPage,
@@ -69,6 +73,9 @@ export default function SystemLayout({
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false)
   const [onlineUserCount, setOnlineUserCount] = useState<number | null>(null)
   const [presenceError, setPresenceError] = useState('')
+  const [notifications, setNotifications] = useState<AppNotification[]>([])
+  const [notificationError, setNotificationError] = useState('')
+  const [isNotificationOpen, setIsNotificationOpen] = useState(false)
   const accountMenuRef = useRef<HTMLDivElement>(null)
 
   const canonicalRoute = route === '/tasks/assign'
@@ -156,6 +163,33 @@ export default function SystemLayout({
   }, [onSessionExpired])
 
   useEffect(() => {
+    let active = true
+    async function refreshNotifications() {
+      try {
+        const result = await getNotifications()
+        if (active) {
+          setNotifications(result.items)
+          setNotificationError('')
+        }
+      } catch (error) {
+        if (!active) return
+        if (error instanceof ApiError && error.status === 401) {
+          onSessionExpired()
+          return
+        }
+        setNotificationError(error instanceof Error ? error.message : '通知加载失败。')
+      }
+    }
+
+    void refreshNotifications()
+    const timer = window.setInterval(() => void refreshNotifications(), 60_000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [onSessionExpired, username])
+
+  useEffect(() => {
     const controller = new AbortController()
     void getMenuSections(controller.signal)
       .then(setMenuSections)
@@ -226,6 +260,56 @@ export default function SystemLayout({
         </a>
 
         <div className="header-tools">
+          <div className="notification-menu">
+            <button
+              aria-expanded={isNotificationOpen}
+              aria-label={`通知，${notifications.filter((notification) => !notification.is_read).length} 条未读`}
+              className="notification-trigger"
+              onClick={() => setIsNotificationOpen((open) => !open)}
+              type="button"
+            >
+              通知
+              {notifications.some((notification) => !notification.is_read) && (
+                <span className="notification-count">
+                  {notifications.filter((notification) => !notification.is_read).length}
+                </span>
+              )}
+            </button>
+            {isNotificationOpen && (
+              <div aria-label="站内通知" className="notification-dropdown">
+                {notificationError && (
+                  <p className="platform-error" role="alert">{notificationError}</p>
+                )}
+                {notifications.length === 0 ? (
+                  <p className="data-empty">暂无通知。</p>
+                ) : notifications.map((notification) => (
+                  <button
+                    className={`notification-item${notification.is_read ? '' : ' is-unread'}`}
+                    key={notification.id}
+                    onClick={async () => {
+                      try {
+                        if (!notification.is_read) {
+                          await markNotificationRead(notification.id)
+                          setNotifications((current) => current.map((item) =>
+                            item.id === notification.id ? { ...item, is_read: true } : item,
+                          ))
+                        }
+                        setIsNotificationOpen(false)
+                        if (notification.link) navigateTo(notification.link)
+                      } catch (error) {
+                        setNotificationError(error instanceof Error ? error.message : '通知更新失败。')
+                      }
+                    }}
+                    type="button"
+                  >
+                    <strong>{notification.title}</strong>
+                    <span>{notification.body}</span>
+                    <time>{formatDate(notification.created_at)}</time>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="account-menu" ref={accountMenuRef}>
             <button
               aria-expanded={isAccountMenuOpen}
@@ -415,6 +499,7 @@ export default function SystemLayout({
               ) : route === '/operations/security' || route === '/operations/complaints' ? (
                 <QualityManagementPage
                   onSessionExpired={onSessionExpired}
+                  role={role}
                   route={route}
                 />
               ) : route === '/analytics' ? (

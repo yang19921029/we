@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import {
+  batchAssignAnnotationTasks,
   autoAssignAnnotationTask,
   createAnnotationTask,
   getAnnotationTasks,
@@ -65,6 +66,9 @@ export function TaskManagementPage({
   const [pendingUpdate, setPendingUpdate] = useState<PendingTaskUpdate | null>(null)
   const [isUpdatingTask, setIsUpdatingTask] = useState(false)
   const [confirmError, setConfirmError] = useState('')
+  const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([])
+  const [batchAssignee, setBatchAssignee] = useState('')
+  const [isBatchAssigning, setIsBatchAssigning] = useState(false)
 
   const loadPageData = useCallback(async (requestedPage = page) => {
     setIsLoading(true)
@@ -106,6 +110,11 @@ export function TaskManagementPage({
   const assigneeMembers = selectedDataset
     ? membersByProject[selectedDataset.project_id] ?? []
     : []
+  const batchAssigneeOptions = [...new Map(
+    Object.values(membersByProject)
+      .flat()
+      .map((member) => [member.username, member]),
+  ).values()]
 
   useEffect(() => {
     void loadPageData()
@@ -225,6 +234,26 @@ export function TaskManagementPage({
     }
   }
 
+  async function batchAssign() {
+    if (!selectedTaskIds.length || !batchAssignee) return
+    setIsBatchAssigning(true)
+    setError('')
+    try {
+      await batchAssignAnnotationTasks(selectedTaskIds, batchAssignee)
+      setTasks((current) => current.map((task) =>
+        selectedTaskIds.includes(task.id)
+          ? { ...task, assignee: batchAssignee }
+          : task,
+      ))
+      setSelectedTaskIds([])
+      setStatus(`已批量分配 ${selectedTaskIds.length} 个任务。`)
+    } catch (cause) {
+      setError(handlePageError(cause, onSessionExpired, '批量分配失败。'))
+    } finally {
+      setIsBatchAssigning(false)
+    }
+  }
+
   return (
     <>
       <PageTitle
@@ -241,6 +270,28 @@ export function TaskManagementPage({
             <p>{totalTasks} 个任务</p>
           </div>
           <div className="platform-page-actions">
+            {selectedTaskIds.length > 0 && (
+              <>
+                <select
+                  aria-label="批量分配负责人"
+                  onChange={(event) => setBatchAssignee(event.target.value)}
+                  value={batchAssignee}
+                >
+                  <option value="">选择负责人</option>
+                  {batchAssigneeOptions.map((member) => (
+                    <option key={member.id} value={member.username}>{member.username}</option>
+                  ))}
+                </select>
+                <button
+                  className="platform-secondary-button"
+                  disabled={!batchAssignee || isBatchAssigning}
+                  onClick={() => void batchAssign()}
+                  type="button"
+                >
+                  {isBatchAssigning ? '分配中…' : `批量分配 (${selectedTaskIds.length})`}
+                </button>
+              </>
+            )}
             <button className="platform-secondary-button" onClick={() => void loadPageData()} type="button">刷新</button>
             <button
               className="welcome-action"
@@ -264,6 +315,17 @@ export function TaskManagementPage({
             <table className="data-table">
               <thead>
                 <tr>
+                  <th scope="col">
+                    <input
+                      aria-label="选择当前页全部任务"
+                      checked={tasks.length > 0 && tasks.every((task) => selectedTaskIds.includes(task.id))}
+                      onChange={(event) => setSelectedTaskIds((current) => event.target.checked
+                        ? [...new Set([...current, ...tasks.map((task) => task.id)])]
+                        : current.filter((id) => !tasks.some((task) => task.id === id)),
+                      )}
+                      type="checkbox"
+                    />
+                  </th>
                   <th scope="col">任务</th>
                   <th scope="col">项目</th>
                   <th scope="col">数据集 / 标签</th>
@@ -278,6 +340,17 @@ export function TaskManagementPage({
               <tbody>
                 {tasks.map((task) => (
                   <tr key={task.id}>
+                    <td>
+                      <input
+                        aria-label={`选择任务 ${task.name}`}
+                        checked={selectedTaskIds.includes(task.id)}
+                        onChange={(event) => setSelectedTaskIds((current) => event.target.checked
+                          ? [...current, task.id]
+                          : current.filter((id) => id !== task.id),
+                        )}
+                        type="checkbox"
+                      />
+                    </td>
                     <td>{task.name}</td>
                     <td>{task.project_name}</td>
                     <td>{task.dataset_name} / {task.label_schema_name}</td>

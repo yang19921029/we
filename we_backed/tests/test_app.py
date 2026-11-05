@@ -217,6 +217,20 @@ class FakeCursor:
                     ),
                     None,
                 )
+            elif "WHERE u.username = %s" in query:
+                user = next(
+                    (
+                        user
+                        for user in self.database.users.values()
+                        if user["username"] == params[0] and user["is_active"]
+                    ),
+                    None,
+                )
+                self.result = (
+                    {"id": user["id"]}
+                    if user and params[1] in self.database.member_project_ids
+                    else None
+                )
             elif "WHERE username = %s" in query:
                 self.result = next(
                     (
@@ -240,6 +254,10 @@ class FakeCursor:
             else:
                 self.result = None
         elif "UPDATE annotation_tasks SET assignee" in query:
+            assignee, task_id = params
+            for task in self.database.tasks:
+                if task.get("id") == task_id:
+                    task["assignee"] = assignee
             self.result = None
         elif "UPDATE annotation_tasks SET status = %s WHERE id = %s" in query:
             status, task_id = params
@@ -254,15 +272,33 @@ class FakeCursor:
                 if task.get("id") == task_id:
                     task["status"] = "已完成"
             self.result = None
+        elif "SELECT t.id, t.name, d.project_id" in query and "FROM annotation_tasks" in query:
+            task_id = params[0]
+            task = next(
+                (task for task in self.database.tasks if task.get("id") == task_id),
+                None,
+            )
+            self.result = (
+                {
+                    "id": task_id,
+                    "name": task.get("name", f"任务 {task_id}"),
+                    "project_id": self.database.dataset_projects.get(task.get("dataset_id", 1), 1),
+                }
+                if task
+                else None
+            )
         elif "SELECT t.status, d.project_id FROM annotation_tasks" in query:
             task_id = params[0]
             self.result = next(
                 (dict(task) for task in self.database.tasks if task.get("id") == task_id),
                 None,
             )
-        elif "SELECT task_id FROM task_items WHERE item_id" in query:
+        elif "SELECT task_id" in query and "FROM task_items WHERE item_id" in query:
             self.result = [
-                {"task_id": item["task_id"]}
+                {
+                    "task_id": item["task_id"],
+                    "assignee": item.get("assignee"),
+                }
                 for item in self.database.task_items
                 if item["item_id"] == params[0]
             ]
@@ -282,7 +318,115 @@ class FakeCursor:
                 )
             }
         elif "UPDATE task_items SET assignee" in query:
+            assignee, task_id = params
+            for item in self.database.task_items:
+                if item["task_id"] == task_id:
+                    item["assignee"] = assignee
             self.result = None
+        elif "INSERT INTO annotation_issues" in query:
+            item_id, dataset_id, project_id, issue_type, description, reported_by = params
+            issue_id = len(self.database.issues) + 1
+            self.database.issues.append(
+                {
+                    "id": issue_id,
+                    "item_id": item_id,
+                    "dataset_id": dataset_id,
+                    "project_id": project_id,
+                    "issue_type": issue_type,
+                    "description": description,
+                    "reported_by": reported_by,
+                    "status": "待处理",
+                    "assignee": None,
+                    "resolution": "",
+                    "created_at": "2026-10-30",
+                    "updated_at": "2026-10-30",
+                }
+            )
+            self.lastrowid = issue_id
+            self.result = None
+        elif "INSERT INTO notifications" in query:
+            recipient, title, body, link = params
+            notification_id = len(self.database.notifications) + 1
+            self.database.notifications.append(
+                {
+                    "id": notification_id,
+                    "recipient": recipient,
+                    "title": title,
+                    "body": body,
+                    "link": link,
+                    "is_read": 0,
+                    "created_at": "2026-10-30",
+                }
+            )
+            self.result = None
+        elif "FROM quality_rules" in query and "SELECT rule_key" in query:
+            self.result = [dict(rule) for rule in self.database.quality_rules]
+        elif "UPDATE quality_rules SET enabled" in query:
+            enabled, threshold, rule_key = params
+            rule = next(rule for rule in self.database.quality_rules if rule["rule_key"] == rule_key)
+            rule.update(enabled=enabled, threshold=threshold)
+            self.result = None
+        elif "FROM annotation_issues" in query:
+            if "COUNT(*) AS total" in query:
+                self.result = {"total": len(self.database.issues)}
+            elif "WHERE id = %s" in query:
+                self.result = next(
+                    (dict(issue) for issue in self.database.issues if issue["id"] == params[0]),
+                    None,
+                )
+            else:
+                self.result = [dict(issue) for issue in self.database.issues]
+        elif "UPDATE annotation_issues SET" in query:
+            updates = query.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+            fields = [part.split(" = ", 1)[0] for part in updates.split(", ")]
+            issue = next(
+                (issue for issue in self.database.issues if issue["id"] == params[-1]),
+                None,
+            )
+            if issue:
+                issue.update(dict(zip(fields, params[:-1])))
+                self.rowcount = 1
+            self.result = None
+        elif "SELECT COUNT(*) AS total FROM notifications" in query:
+            self.result = {
+                "total": sum(
+                    notification["recipient"] == params[0]
+                    for notification in self.database.notifications
+                )
+            }
+        elif "FROM notifications WHERE recipient" in query:
+            recipient = params[0]
+            self.result = [
+                {key: value for key, value in notification.items() if key != "recipient"}
+                for notification in self.database.notifications
+                if notification["recipient"] == recipient
+            ]
+        elif "UPDATE notifications SET is_read" in query:
+            notification_id, recipient = params
+            matched = next(
+                (
+                    notification
+                    for notification in self.database.notifications
+                    if notification["id"] == notification_id
+                    and notification["recipient"] == recipient
+                ),
+                None,
+            )
+            self.rowcount = int(matched is not None)
+            if matched:
+                matched["is_read"] = 1
+            self.result = None
+        elif "SELECT id FROM notifications WHERE id" in query:
+            notification_id, recipient = params
+            self.result = (
+                {"id": notification_id}
+                if any(
+                    notification["id"] == notification_id
+                    and notification["recipient"] == recipient
+                    for notification in self.database.notifications
+                )
+                else None
+            )
         elif "UPDATE datasets SET record_count = record_count +" in query:
             self.result = None
         elif "SELECT project_id FROM project_members" in query:
@@ -505,6 +649,10 @@ class FakeCursor:
     def fetchall(self):
         return self.result
 
+    def executemany(self, query, rows):
+        for params in rows:
+            self.execute(query, params)
+
 
 class FakeDatabase:
     def __init__(self):
@@ -512,6 +660,15 @@ class FakeDatabase:
         self.member_relations = set()
         self.tasks = []
         self.task_items = []
+        self.issues = []
+        self.notifications = []
+        self.quality_rules = [
+            {"rule_key": "empty_content", "name": "内容完整性", "enabled": 1, "threshold": None},
+            {"rule_key": "min_length", "name": "内容长度", "enabled": 1, "threshold": 3},
+            {"rule_key": "missing_label", "name": "标注结果", "enabled": 1, "threshold": None},
+            {"rule_key": "missing_annotator", "name": "标注人信息", "enabled": 1, "threshold": None},
+            {"rule_key": "duplicate_content", "name": "数据集内重复内容", "enabled": 1, "threshold": None},
+        ]
         self.dataset_projects = {1: 1, 2: 2}
         self.users = {
             7: {
@@ -1053,6 +1210,30 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json["message"], "请选择有效的数据集。")
+
+    def test_tasks_can_be_assigned_in_a_validated_batch(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        self.database.tasks = [
+            {"id": 31, "name": "任务 A", "dataset_id": 1, "assignee": "old"},
+            {"id": 32, "name": "任务 B", "dataset_id": 1, "assignee": "old"},
+        ]
+        self.database.member_project_ids.add(1)
+        invalid = self.client.post(
+            "/api/tasks/batch-assign",
+            json={"task_ids": [31, 31], "assignee": "tester"},
+        )
+        self.assertEqual(invalid.status_code, 400)
+
+        result = self.client.post(
+            "/api/tasks/batch-assign",
+            json={"task_ids": [31, 32], "assignee": "tester"},
+        )
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual([task["assignee"] for task in self.database.tasks], ["tester", "tester"])
+        self.assertEqual(len(self.database.notifications), 2)
 
     def test_login_rejects_invalid_password(self):
         response = self.client.post(
@@ -1851,6 +2032,112 @@ class ApiTestCase(unittest.TestCase):
             self.elastic.items["doc-1"]["issue_reports"][0]["description"],
             "原文内容不完整",
         )
+        self.assertEqual(len(self.database.issues), 1)
+
+    def test_issue_feedback_can_be_triaged_and_resolved(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        self.database.issues.append(
+            {
+                "id": 1,
+                "item_id": "doc-1",
+                "dataset_id": 1,
+                "project_id": 1,
+                "issue_type": "数据异常",
+                "description": "内容需要复核",
+                "reported_by": "tester",
+                "status": "待处理",
+                "assignee": None,
+                "resolution": "",
+                "created_at": "2026-10-30",
+                "updated_at": "2026-10-30",
+            }
+        )
+        issue_list = self.client.get("/api/issues?page=1&page_size=20")
+        self.assertEqual(issue_list.status_code, 200)
+        self.assertEqual(issue_list.json["data"]["total"], 1)
+
+        invalid_resolution = self.client.patch(
+            "/api/issues/1",
+            json={"status": "已解决"},
+        )
+        self.assertEqual(invalid_resolution.status_code, 400)
+        resolved = self.client.patch(
+            "/api/issues/1",
+            json={"status": "已解决", "resolution": "已修复并复核"},
+        )
+        self.assertEqual(resolved.status_code, 200)
+        self.assertEqual(self.database.issues[0]["status"], "已解决")
+        self.assertEqual(self.database.issues[0]["resolution"], "已修复并复核")
+        self.assertEqual(self.database.notifications[0]["recipient"], "tester")
+
+    def test_quality_rules_can_be_configured_and_validated(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        current = self.client.get("/api/quality-rules")
+        self.assertEqual(current.status_code, 200)
+        rules = current.json["data"]
+        for rule in rules:
+            if rule["key"] == "min_length":
+                rule["threshold"] = 8
+            if rule["key"] == "duplicate_content":
+                rule["enabled"] = False
+            if rule["key"] == "missing_label":
+                rule["enabled"] = False
+        updated = self.client.put("/api/quality-rules", json={"rules": rules})
+        self.assertEqual(updated.status_code, 200)
+        configured = self.client.get("/api/quality-rules")
+        self.assertEqual(
+            next(rule for rule in configured.json["data"] if rule["key"] == "min_length")["threshold"],
+            8,
+        )
+        quality_check = self.client.get("/api/data-items/doc-1/quality-check")
+        self.assertEqual(quality_check.status_code, 200)
+        self.assertNotIn("尚未设置标注结果。", quality_check.json["data"]["warnings"])
+        invalid_rules = [dict(rule) for rule in rules]
+        next(rule for rule in invalid_rules if rule["key"] == "min_length")["threshold"] = 0
+        self.assertEqual(
+            self.client.put("/api/quality-rules", json={"rules": invalid_rules}).status_code,
+            400,
+        )
+
+    def test_notifications_are_private_and_can_be_marked_read(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        self.database.notifications.extend(
+            [
+                {
+                    "id": 1,
+                    "recipient": "tester",
+                    "title": "新任务",
+                    "body": "任务已分配",
+                    "link": "/data/label/1",
+                    "is_read": 0,
+                    "created_at": "2026-10-30",
+                },
+                {
+                    "id": 2,
+                    "recipient": "other-user",
+                    "title": "私有通知",
+                    "body": "不可见",
+                    "link": "",
+                    "is_read": 0,
+                    "created_at": "2026-10-30",
+                },
+            ]
+        )
+        notifications = self.client.get("/api/notifications")
+        self.assertEqual(notifications.status_code, 200)
+        self.assertEqual([item["id"] for item in notifications.json["data"]["items"]], [1])
+        self.assertEqual(self.client.patch("/api/notifications/1/read").status_code, 200)
+        self.assertEqual(self.database.notifications[0]["is_read"], 1)
+        self.assertEqual(self.client.patch("/api/notifications/2/read").status_code, 404)
 
     def test_data_list_paginates_and_validates_parameters(self):
         self.client.post(

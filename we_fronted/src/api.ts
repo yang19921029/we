@@ -182,6 +182,37 @@ export type AuditLog = {
   created_at: string
 }
 
+export type AppNotification = {
+  id: number
+  title: string
+  body: string
+  link: string
+  is_read: boolean
+  created_at: string
+}
+
+export type QualityRule = {
+  key: 'empty_content' | 'min_length' | 'missing_label' | 'missing_annotator' | 'duplicate_content'
+  name: string
+  enabled: boolean
+  threshold: number | null
+}
+
+export type AnnotationIssue = {
+  id: number
+  item_id: string
+  dataset_id: number
+  project_id: number
+  issue_type: DataItemIssueType
+  description: string
+  reported_by: string
+  status: '待处理' | '处理中' | '已解决' | '已关闭'
+  assignee: string | null
+  resolution: string
+  created_at: string
+  updated_at: string
+}
+
 type ApiResponse<T> = {
   code: number
   message: string
@@ -513,6 +544,16 @@ export function autoAssignAnnotationTask(
   return request(`/tasks/${taskId}/auto-assign`, { method: 'POST' })
 }
 
+export function batchAssignAnnotationTasks(
+  taskIds: number[],
+  assignee: string,
+): Promise<{ task_ids: number[]; assignee: string }> {
+  return request('/tasks/batch-assign', {
+    method: 'POST',
+    body: JSON.stringify({ task_ids: taskIds, assignee }),
+  })
+}
+
 export function skipTaskItem(
   taskId: number,
   itemId: string,
@@ -692,4 +733,51 @@ export function reportDataItemIssue(
     method: 'POST',
     body: JSON.stringify({ type, description }),
   })
+}
+
+export function getQualityRules(signal?: AbortSignal): Promise<QualityRule[]> {
+  return request('/quality-rules', { signal })
+}
+
+export function saveQualityRules(rules: QualityRule[]): Promise<QualityRule[]> {
+  return request('/quality-rules', {
+    method: 'PUT',
+    body: JSON.stringify({ rules }),
+  })
+}
+
+export function getAnnotationIssues(
+  options: { page?: number; pageSize?: number; status?: AnnotationIssue['status'] } = {},
+  signal?: AbortSignal,
+): Promise<{ items: AnnotationIssue[]; total: number; page: number; page_size: number }> {
+  const query = new URLSearchParams({
+    page: String(options.page ?? 1),
+    page_size: String(options.pageSize ?? 20),
+  })
+  if (options.status) query.set('status', options.status)
+  return request(`/issues?${query}`, { signal })
+}
+
+export function updateAnnotationIssue(
+  issueId: number,
+  changes: {
+    status?: AnnotationIssue['status']
+    assignee?: string | null
+    resolution?: string
+  },
+): Promise<{ id: number }> {
+  return request(`/issues/${issueId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(changes),
+  })
+}
+
+export function getNotifications(
+  signal?: AbortSignal,
+): Promise<{ items: AppNotification[]; total: number; page: number; page_size: number }> {
+  return request('/notifications?page_size=10', { signal })
+}
+
+export function markNotificationRead(notificationId: number): Promise<{ id: number }> {
+  return request(`/notifications/${notificationId}/read`, { method: 'PATCH' })
 }
