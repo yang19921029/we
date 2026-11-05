@@ -59,6 +59,8 @@ export type DataItemsPage = {
   total: number
   page: number
   page_size: number
+  next_cursor: string | null
+  pit_id: string | null
 }
 
 export type LabelStatusFilter =
@@ -131,6 +133,13 @@ export type AnnotationTask = {
   created_at: string
   total_items: number
   labeled_items: number
+}
+
+export type AnnotationTasksPage = {
+  items: AnnotationTask[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export type PlatformStatistics = {
@@ -311,6 +320,8 @@ export function getDataItems(
   searchText = '',
   sortBy: 'newest' | 'uncertain' = 'newest',
   taskId?: number,
+  after?: string,
+  pitId?: string,
 ): Promise<DataItemsPage> {
   const query = new URLSearchParams({
     page: String(page),
@@ -321,6 +332,8 @@ export function getDataItems(
   })
   if (datasetId !== undefined) query.set('dataset_id', String(datasetId))
   if (taskId !== undefined) query.set('task_id', String(taskId))
+  if (after) query.set('after', after)
+  if (pitId) query.set('pit_id', pitId)
   return request<DataItemsPage>(`/data-items?${query}`, { signal })
 }
 
@@ -435,10 +448,22 @@ export function updateLabelSchema(
   })
 }
 
+export function getAnnotationTasks(signal?: AbortSignal): Promise<AnnotationTask[]>
 export function getAnnotationTasks(
   signal?: AbortSignal,
-): Promise<AnnotationTask[]> {
-  return request('/tasks', { signal })
+  page?: number,
+  pageSize?: number,
+): Promise<AnnotationTasksPage>
+export function getAnnotationTasks(
+  signal?: AbortSignal,
+  page?: number,
+  pageSize?: number,
+): Promise<AnnotationTask[] | AnnotationTasksPage> {
+  const query = new URLSearchParams()
+  if (page !== undefined) query.set('page', String(page))
+  if (pageSize !== undefined) query.set('page_size', String(pageSize))
+  const suffix = query.size ? `?${query}` : ''
+  return request(`/tasks${suffix}`, { signal })
 }
 
 export function createAnnotationTask(input: {

@@ -34,6 +34,8 @@ from app import (
 MAX_IMPORT_FILE_BYTES = 1024 * 1024 * 1024
 MAX_IMPORT_RECORD_BYTES = 50 * 1024 * 1024
 MAX_IMPORT_REQUEST_OVERHEAD_BYTES = 1024 * 1024
+IMPORT_BULK_MAX_RECORDS = 100
+IMPORT_BULK_MAX_BYTES = 5 * 1024 * 1024
 
 
 class DatasetImportError(ValueError):
@@ -497,6 +499,8 @@ def register_project_routes(app):
 
         indexed = 0
         skipped_duplicates = 0
+        failed_records = 0
+        import_error = None
         with tempfile.TemporaryDirectory() as temp_dir:
             dedupe_db = sqlite3.connect(f"{temp_dir}/import-ids.sqlite3")
             try:
@@ -504,6 +508,30 @@ def register_project_routes(app):
                     "CREATE TABLE imported_ids (id TEXT PRIMARY KEY)"
                 )
                 client = app_module.get_es_client()
+                operations = []
+                batch_bytes = 0
+
+                def write_batch():
+                    nonlocal indexed, failed_records, batch_bytes
+                    if not operations:
+                        return
+                    result = client.bulk(
+                        operations=operations,
+                        refresh=False,
+                    )
+                    for item in result.get("items", []):
+                        operation_result = item.get("index", {})
+                        if 200 <= operation_result.get("status", 0) < 300:
+                            indexed += 1
+                        else:
+                            failed_records += 1
+                    if len(result.get("items", [])) != len(operations) // 2:
+                        raise RuntimeError(
+                            "Elasticsearch Bulk 响应中的记录数与请求不匹配。"
+                        )
+                    operations.clear()
+                    batch_bytes = 0
+
                 for record in _iter_dataset_import_records(uploaded_file, filename):
                     external_id = record.get("_id", record.get("source_id"))
                     item_id = (
@@ -526,31 +554,91 @@ def register_project_routes(app):
                     document.setdefault(
                         "inserted_at", datetime.now(timezone.utc).isoformat()
                     )
-                    client.index(
-                        index=current_app.config["ELASTICSEARCH_INDEX"],
-                        id=item_id,
-                        document=document,
-                        refresh="wait_for",
+                    action = {
+                        "index": {
+                            "_index": current_app.config["ELASTICSEARCH_INDEX"],
+                            "_id": item_id,
+                        }
+                    }
+                    document_bytes = len(
+                        json.dumps(document, ensure_ascii=False).encode("utf-8")
                     )
-                    indexed += 1
+                    if operations and (
+                        len(operations) // 2 >= IMPORT_BULK_MAX_RECORDS
+                        or batch_bytes + document_bytes > IMPORT_BULK_MAX_BYTES
+                    ):
+                        write_batch()
+                    operations.extend((action, document))
+                    batch_bytes += document_bytes
+                write_batch()
+                if indexed:
+                    client.indices.refresh(
+                        index=current_app.config["ELASTICSEARCH_INDEX"]
+                    )
             except (ApiError, TransportError, RuntimeError, ValueError) as error:
-                return elastic_error_response(error)
+                import_error = error
             finally:
                 dedupe_db.close()
 
         db = app_module.get_db()
-        with db.cursor() as cursor:
-            cursor.execute(
-                "UPDATE datasets SET record_count = record_count + %s WHERE id = %s",
-                (indexed, dataset_id),
-            )
+        if indexed:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE datasets SET record_count = record_count + %s WHERE id = %s",
+                    (indexed, dataset_id),
+                )
         write_audit_log(
             "导入数据",
             "数据集",
             dataset_id,
-            {"imported_count": indexed, "skipped_duplicate_count": skipped_duplicates},
+            {
+                "imported_count": indexed,
+                "failed_count": failed_records,
+                "skipped_duplicate_count": skipped_duplicates,
+            },
         )
         db.commit()
+        if import_error is not None:
+            if indexed or failed_records:
+                current_app.logger.error(
+                    "Dataset import stopped after a Bulk request error; "
+                    "%s successful and %s rejected records were confirmed.",
+                    indexed,
+                    failed_records,
+                    exc_info=import_error,
+                )
+                return jsonify(
+                    code=503,
+                    message=(
+                        f"导入中断：已确认写入 {indexed} 条，"
+                        f"失败 {failed_records} 条。数据集计数已更新，"
+                        "请检查后重试。"
+                    ),
+                    data={
+                        "dataset_id": dataset_id,
+                        "imported_count": indexed,
+                        "failed_count": failed_records,
+                        "skipped_duplicate_count": skipped_duplicates,
+                    },
+                ), 503
+            return elastic_error_response(import_error)
+        if failed_records:
+            current_app.logger.error(
+                "Elasticsearch rejected %s dataset import records.", failed_records
+            )
+            return jsonify(
+                code=503,
+                message=(
+                    f"导入部分失败：成功 {indexed} 条，失败 {failed_records} 条。"
+                    "数据集计数已按成功写入数更新，请检查错误记录后重试。"
+                ),
+                data={
+                    "dataset_id": dataset_id,
+                    "imported_count": indexed,
+                    "failed_count": failed_records,
+                    "skipped_duplicate_count": skipped_duplicates,
+                },
+            ), 503
         return jsonify(
             code=0,
             message="数据导入完成。",

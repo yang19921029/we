@@ -2,6 +2,8 @@
 
 import app as app_module
 
+import base64
+import binascii
 from elasticsearch.exceptions import ApiError
 from elasticsearch.exceptions import NotFoundError
 from elasticsearch.exceptions import TransportError
@@ -308,49 +310,119 @@ def register_data_query_routes(app):
         sort_by = request.args.get("sort", "newest")
         if sort_by not in {"newest", "uncertain"}:
             return jsonify(code=400, message="排序方式无效。", data=None), 400
+        after_raw = request.args.get("after")
+        pit_id = request.args.get("pit_id")
+        search_after = None
+        if after_raw:
+            try:
+                encoded_cursor = after_raw.encode("ascii")
+                decoded_cursor = base64.urlsafe_b64decode(
+                    encoded_cursor + b"=" * (-len(encoded_cursor) % 4)
+                )
+                search_after = json.loads(decoded_cursor)
+            except (
+                UnicodeEncodeError,
+                UnicodeDecodeError,
+                binascii.Error,
+                json.JSONDecodeError,
+            ):
+                return jsonify(code=400, message="分页游标无效。", data=None), 400
+            if (
+                not isinstance(search_after, list)
+                or not search_after
+                or len(search_after) > 16
+                or not all(
+                    value is None
+                    or isinstance(value, (str, int, float))
+                    and not isinstance(value, bool)
+                    for value in search_after
+                )
+            ):
+                return jsonify(code=400, message="分页游标无效。", data=None), 400
+        if pit_id is not None and (not pit_id or len(pit_id) > 512):
+            return jsonify(code=400, message="分页快照无效。", data=None), 400
+        if after_raw and not pit_id:
+            return jsonify(code=400, message="分页游标缺少分页快照。", data=None), 400
+        if page > 1 and pit_id and not after_raw:
+            return jsonify(code=400, message="分页快照缺少分页游标。", data=None), 400
+        use_point_in_time = page == 1 or bool(pit_id)
         query = query_body if filters or search_text else {"match_all": {}}
         try:
-            response = app_module.get_es_client().search(
-                index=current_app.config["ELASTICSEARCH_INDEX"],
-                query=query,
-                from_=(page - 1) * page_size,
-                size=page_size,
-                track_total_hits=True,
-                sort=(
-                    [
-                        {
-                            "confidence": {
-                                "order": "asc",
-                                "missing": "_last",
-                                "unmapped_type": "float",
-                            }
+            client = app_module.get_es_client()
+            search_sort = (
+                [
+                    {
+                        "confidence": {
+                            "order": "asc",
+                            "missing": "_last",
+                            "unmapped_type": "float",
                         }
-                    ]
-                    if sort_by == "uncertain"
-                    else [
-                        {
-                            field: {
-                                "order": "desc",
-                                "missing": "_last",
-                                "unmapped_type": "date",
-                            }
+                    }
+                ]
+                if sort_by == "uncertain"
+                else [
+                    {
+                        field: {
+                            "order": "desc",
+                            "missing": "_last",
+                            "unmapped_type": "date",
                         }
-                        for field in (
-                            "inserted_at",
-                            "created_at",
-                            "@timestamp",
-                            "timestamp",
-                            "order_date",
-                        )
-                    ]
-                ),
+                    }
+                    for field in (
+                        "inserted_at",
+                        "created_at",
+                        "@timestamp",
+                        "timestamp",
+                        "order_date",
+                    )
+                ]
             )
+            search_kwargs = {
+                "query": query,
+                "size": page_size,
+                "track_total_hits": True,
+                "sort": search_sort,
+            }
+            if use_point_in_time:
+                if pit_id is None:
+                    pit_id = client.open_point_in_time(
+                        index=current_app.config["ELASTICSEARCH_INDEX"],
+                        keep_alive="5m",
+                    )["id"]
+                search_kwargs["pit"] = {"id": pit_id, "keep_alive": "5m"}
+                search_kwargs["sort"] = [*search_sort, "_shard_doc"]
+                if search_after is not None:
+                    search_kwargs["search_after"] = search_after
+                response = client.search(**search_kwargs)
+            else:
+                search_kwargs["index"] = current_app.config["ELASTICSEARCH_INDEX"]
+                search_kwargs["from_"] = (page - 1) * page_size
+                response = client.search(**search_kwargs)
         except (ApiError, TransportError, RuntimeError, ValueError) as error:
             return elastic_error_response(error)
         hits = response["hits"]
         total = hits["total"]
         if isinstance(total, dict):
             total = total["value"]
+        response_pit_id = response.get("pit_id", pit_id) if use_point_in_time else None
+        next_cursor = None
+        if (
+            use_point_in_time
+            and response_pit_id
+            and hits["hits"]
+            and page * page_size < total
+        ):
+            last_sort = hits["hits"][-1].get("sort")
+            if not isinstance(last_sort, list):
+                current_app.logger.error(
+                    "Elasticsearch PIT response is missing sort values."
+                )
+                return jsonify(
+                    code=503, message="无法继续加载下一页，请重试。", data=None
+                ), 503
+            next_cursor = base64.urlsafe_b64encode(
+                json.dumps(last_sort, separators=(",", ":")).encode("utf-8")
+            ).decode("ascii").rstrip("=")
         return jsonify(
             code=0,
             message="ok",
@@ -359,6 +431,8 @@ def register_data_query_routes(app):
                 "total": total,
                 "page": page,
                 "page_size": page_size,
+                "next_cursor": next_cursor,
+                "pit_id": response_pit_id,
             },
         )
 

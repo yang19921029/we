@@ -28,6 +28,8 @@ export function DataLabelPage({
   initialTaskId?: number
 }) {
   const [page, setPage] = useState(1)
+  const [pageCursors, setPageCursors] = useState<Record<number, string>>({})
+  const [pitId, setPitId] = useState<string | undefined>()
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [tasks, setTasks] = useState<AnnotationTask[]>([])
   const [schemas, setSchemas] = useState<LabelSchema[]>([])
@@ -64,13 +66,29 @@ export function DataLabelPage({
   const labelChoices = activeSchema
     ? activeSchema.labels.map((label) => label.name)
     : LABEL_OPTIONS
-  const { items, total, isLoading, error, retry, saveLabel } = useDataItems(
+  const {
+    items,
+    total,
+    isLoading,
+    error,
+    retry,
+    saveLabel,
+    nextCursor,
+    pitId: responsePitId,
+    responsePage,
+    requestKey,
+    responseKey,
+  } = useDataItems(
     onSessionExpired,
     page,
     ANNOTATION_PAGE_SIZE,
     'all',
     selectedTask?.dataset_id,
     selectedTask?.id,
+    '',
+    'newest',
+    pageCursors[page],
+    pitId,
   )
   const [chosenLabel, setChosenLabel] = useState<DataLabel | null>(null)
   const [labelHistory, setLabelHistory] = useState<Array<DataLabel | null>>([null])
@@ -100,6 +118,14 @@ export function DataLabelPage({
   const activeLabel = chosenLabel
   const selectedMedia = selectedItem ? getMediaPreviews(selectedItem.fields) : []
   const pageCount = Math.max(1, Math.ceil(total / ANNOTATION_PAGE_SIZE))
+
+  useEffect(() => {
+    if (responsePage !== page || responseKey !== requestKey) return
+    if (responsePitId) setPitId(responsePitId)
+    if (nextCursor) {
+      setPageCursors((current) => ({ ...current, [page + 1]: nextCursor }))
+    }
+  }, [nextCursor, page, requestKey, responseKey, responsePage, responsePitId])
 
   useEffect(() => {
     if (!selectedItem) return
@@ -430,6 +456,8 @@ export function DataLabelPage({
             flushPendingSave()
             setSelectedTaskId(event.target.value)
             setPage(1)
+            setPageCursors({})
+            setPitId(undefined)
             setSelectedId(null)
             selectedIdRef.current = null
             setIsDirty(false)
@@ -530,7 +558,7 @@ export function DataLabelPage({
                 </button>
                 <span>{page} / {pageCount}</span>
                 <button
-                  disabled={page >= pageCount}
+                  disabled={page >= pageCount || !pageCursors[page + 1]}
                   onClick={() => {
                     flushPendingSave()
                     selectedIdRef.current = null

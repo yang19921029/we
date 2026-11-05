@@ -339,6 +339,16 @@ class FakeCursor:
             )
         elif "FROM annotation_tasks" in query and "overdue_tasks" in query:
             self.result = {"overdue_tasks": 0}
+        elif "FROM annotation_tasks" in query and "COUNT(*) AS total" in query:
+            self.result = {"total": len(self.database.tasks)}
+        elif "FROM annotation_tasks" in query and "LIMIT %s OFFSET %s" in query:
+            page_size, offset = params[-2:]
+            self.result = [
+                dict(task)
+                for task in self.database.tasks[offset : offset + page_size]
+            ]
+        elif "FROM annotation_tasks" in query:
+            self.result = [dict(task) for task in self.database.tasks]
         elif "FROM organizations" in query:
             self.result = [
                 {"id": 1, "name": "默认组织", "description": "默认组织"}
@@ -459,6 +469,7 @@ class FakeDatabase:
     def __init__(self):
         self.member_project_ids = set()
         self.member_relations = set()
+        self.tasks = []
         self.dataset_projects = {1: 1, 2: 2}
         self.users = {
             7: {
@@ -510,6 +521,7 @@ class FakeIndices:
         self.mapping = None
         self.settings = None
         self.put_mapping_properties = None
+        self.refresh_calls = []
 
     def exists(self, *, index):
         return self.created
@@ -524,6 +536,9 @@ class FakeIndices:
 
     def put_mapping(self, *, index, properties):
         self.put_mapping_properties = properties
+
+    def refresh(self, *, index):
+        self.refresh_calls.append(index)
 
 
 class FakeElastic:
@@ -553,19 +568,37 @@ class FakeElastic:
         self.search_sorts = []
         self.scroll_hits = {}
         self.next_scroll_id = 1
+        self.bulk_requests = []
+        self.pit_counter = 0
+        self.search_requests = []
+
+    def open_point_in_time(self, *, index, keep_alive):
+        self.pit_counter += 1
+        return {"id": f"pit-{self.pit_counter}"}
 
     def search(
         self,
         *,
-        index,
+        index=None,
         query,
-        from_=0,
+        from_=None,
         size=10,
         track_total_hits=True,
         sort=None,
         aggregations=None,
         scroll=None,
+        pit=None,
+        search_after=None,
     ):
+        self.search_requests.append(
+            {
+                "index": index,
+                "from_": from_,
+                "pit": pit,
+                "search_after": search_after,
+                "sort": sort,
+            }
+        )
         self.search_queries.append(query)
         self.search_sorts.append(sort)
         if scroll is not None:
@@ -616,16 +649,31 @@ class FakeElastic:
                     for item_id in item_ids
                     if self.items[item_id].get("label") is None
                 ]
-        selected_ids = item_ids[from_ : from_ + size]
+        start = from_
+        if search_after is not None:
+            start = int(search_after[0]) + 1
+        start = start or 0
+        selected_ids = item_ids[start : start + size]
+        selected_hits = [
+            {
+                "_id": item_id,
+                "_source": self.items[item_id],
+                **(
+                    {"sort": [start + offset]}
+                    if pit is not None
+                    else {}
+                ),
+            }
+            for offset, item_id in enumerate(selected_ids)
+        ]
         response = {
             "hits": {
                 "total": {"value": len(item_ids), "relation": "eq"},
-                "hits": [
-                    {"_id": item_id, "_source": self.items[item_id]}
-                    for item_id in selected_ids
-                ],
+                "hits": selected_hits,
             }
         }
+        if pit is not None:
+            response["pit_id"] = pit["id"]
         if aggregations is not None:
             response["aggregations"] = {
                 name: {"buckets": []} for name in aggregations
@@ -696,6 +744,17 @@ class FakeElastic:
     def index(self, *, index, id, document, refresh):
         self.items[id] = document
         self.indexed_documents.append(id)
+
+    def bulk(self, *, operations, refresh):
+        self.bulk_requests.append((operations.copy(), refresh))
+        results = []
+        for action, document in zip(operations[::2], operations[1::2]):
+            metadata = action["index"]
+            item_id = metadata["_id"]
+            self.items[item_id] = document
+            self.indexed_documents.append(item_id)
+            results.append({"index": {"_id": item_id, "status": 201}})
+        return {"errors": False, "items": results}
 
     @staticmethod
     def missing_document():
@@ -816,6 +875,9 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["data"]["imported_count"], 2)
         self.assertEqual(len(self.elastic.indexed_documents), 2)
+        self.assertEqual(len(self.elastic.bulk_requests), 1)
+        self.assertFalse(self.elastic.bulk_requests[0][1])
+        self.assertEqual(self.elastic.indices.refresh_calls, ["data_items"])
 
     def test_dataset_import_endpoint_accepts_more_than_5000_records(self):
         self.client.post(
@@ -836,6 +898,10 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["data"]["imported_count"], 5001)
         self.assertEqual(len(self.elastic.indexed_documents), 5001)
+        self.assertEqual(len(self.elastic.bulk_requests), 51)
+        self.assertTrue(
+            all(len(operations) <= 200 for operations, _ in self.elastic.bulk_requests)
+        )
 
     def test_task_creation_reports_invalid_configuration_field(self):
         self.client.post(
@@ -1569,7 +1635,7 @@ class ApiTestCase(unittest.TestCase):
                     "timestamp",
                     "order_date",
                 )
-            ],
+            ] + ["_shard_doc"],
         )
         self.assertIn("示例商品", listing.json["data"]["items"][0]["content"])
         self.assertIsNone(listing.json["data"]["items"][0]["label"])
@@ -1665,6 +1731,55 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(page.json["data"]["items"][0]["id"], "doc-2")
 
         invalid_page = self.client.get("/api/data-items?page=0")
+        self.assertEqual(invalid_page.status_code, 400)
+
+    def test_data_list_uses_point_in_time_search_after_for_next_page(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        first_page = self.client.get("/api/data-items?page=1&page_size=1")
+        self.assertEqual(first_page.status_code, 200)
+        self.assertEqual(first_page.json["data"]["items"][0]["id"], "doc-1")
+        cursor = first_page.json["data"]["next_cursor"]
+        pit_id = first_page.json["data"]["pit_id"]
+        self.assertTrue(cursor)
+        self.assertTrue(pit_id)
+
+        second_page = self.client.get(
+            "/api/data-items?page=2&page_size=1"
+            f"&after={cursor}&pit_id={pit_id}"
+        )
+        self.assertEqual(second_page.status_code, 200)
+        self.assertEqual(second_page.json["data"]["items"][0]["id"], "doc-2")
+        request = self.elastic.search_requests[-1]
+        self.assertIsNone(request["index"])
+        self.assertIsNone(request["from_"])
+        self.assertEqual(request["pit"]["id"], pit_id)
+        self.assertEqual(request["search_after"], [0])
+
+        invalid_cursor = self.client.get(
+            "/api/data-items?page=2&after=not-a-valid-cursor"
+        )
+        self.assertEqual(invalid_cursor.status_code, 400)
+
+    def test_task_list_supports_pagination_and_validates_parameters(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        self.database.tasks = [
+            {"id": 1, "name": "first"},
+            {"id": 2, "name": "second"},
+        ]
+        page = self.client.get("/api/tasks?page=2&page_size=1")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.json["data"]["total"], 2)
+        self.assertEqual(page.json["data"]["page"], 2)
+        self.assertEqual(page.json["data"]["items"], [{"id": 2, "name": "second"}])
+        self.assertIn("LIMIT %s OFFSET %s", self.database.last_query)
+
+        invalid_page = self.client.get("/api/tasks?page=0")
         self.assertEqual(invalid_page.status_code, 400)
 
     def test_data_list_filters_by_label_status(self):

@@ -16,7 +16,8 @@ export function DataListPage({
   onOpenDetails: (itemId: string) => void
 }) {
   const [page, setPage] = useState(1)
-  const [pageInput, setPageInput] = useState('1')
+  const [pageCursors, setPageCursors] = useState<Record<number, string>>({})
+  const [pitId, setPitId] = useState<string | undefined>()
   const [labelStatus, setLabelStatus] = useState<LabelStatusFilter>('all')
   const [searchText, setSearchText] = useState('')
   const [appliedSearch, setAppliedSearch] = useState('')
@@ -38,7 +39,18 @@ export function DataListPage({
       })
     return () => controller.abort()
   }, [onSessionExpired])
-  const { items, total, isLoading, error, retry } = useDataItems(
+  const {
+    items,
+    total,
+    isLoading,
+    error,
+    retry,
+    nextCursor,
+    pitId: responsePitId,
+    responsePage,
+    requestKey,
+    responseKey,
+  } = useDataItems(
     onSessionExpired,
     page,
     PAGE_SIZE,
@@ -47,26 +59,28 @@ export function DataListPage({
     undefined,
     appliedSearch,
     sortBy,
+    pageCursors[page],
+    pitId,
   )
   const labeledCount = items.filter((item) => item.label !== null).length
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
-  function goToPage() {
-    const requestedPage = Number(pageInput)
-    if (
-      !Number.isInteger(requestedPage) ||
-      requestedPage < 1 ||
-      requestedPage > pageCount
-    ) {
-      return
+  useEffect(() => {
+    if (responsePage !== page || responseKey !== requestKey) return
+    if (responsePitId) setPitId(responsePitId)
+    if (nextCursor) {
+      setPageCursors((current) => ({ ...current, [page + 1]: nextCursor }))
     }
-    setPage(requestedPage)
-    setPageInput(String(requestedPage))
-  }
+  }, [nextCursor, page, requestKey, responseKey, responsePage, responsePitId])
 
   function changePage(nextPage: number) {
     setPage(nextPage)
-    setPageInput(String(nextPage))
+  }
+
+  function resetPagination() {
+    setPage(1)
+    setPageCursors({})
+    setPitId(undefined)
   }
 
   return (
@@ -85,8 +99,7 @@ export function DataListPage({
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               setAppliedSearch(searchText.trim())
-              setPage(1)
-              setPageInput('1')
+              resetPagination()
             }
           }}
           placeholder="按编号或内容搜索"
@@ -96,8 +109,7 @@ export function DataListPage({
           className="platform-secondary-button"
           onClick={() => {
             setAppliedSearch(searchText.trim())
-            setPage(1)
-            setPageInput('1')
+            resetPagination()
           }}
           type="button"
         >
@@ -106,7 +118,10 @@ export function DataListPage({
         <label htmlFor="data-sort">排序</label>
         <select
           id="data-sort"
-          onChange={(event) => setSortBy(event.target.value as typeof sortBy)}
+          onChange={(event) => {
+            setSortBy(event.target.value as typeof sortBy)
+            resetPagination()
+          }}
           value={sortBy}
         >
           <option value="newest">最新数据</option>
@@ -117,8 +132,7 @@ export function DataListPage({
           id="dataset-filter"
           onChange={(event) => {
             setDatasetId(event.target.value ? Number(event.target.value) : undefined)
-            setPage(1)
-            setPageInput('1')
+            resetPagination()
           }}
           value={datasetId ?? ''}
         >
@@ -132,8 +146,7 @@ export function DataListPage({
           id="label-status-filter"
           onChange={(event) => {
             setLabelStatus(event.target.value as LabelStatusFilter)
-            setPage(1)
-            setPageInput('1')
+            resetPagination()
           }}
           value={labelStatus}
         >
@@ -221,37 +234,11 @@ export function DataListPage({
               上一页
             </button>
             <button
-              disabled={page >= pageCount}
+              disabled={page >= pageCount || !pageCursors[page + 1]}
               onClick={() => changePage(page + 1)}
               type="button"
             >
               下一页
-            </button>
-            <label className="page-jump">
-              <span>跳转</span>
-              <input
-                aria-label="跳转到指定页"
-                max={pageCount}
-                min={1}
-                onChange={(event) => setPageInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') goToPage()
-                }}
-                type="number"
-                value={pageInput}
-              />
-              <span>页</span>
-            </label>
-            <button
-              disabled={
-                !Number.isInteger(Number(pageInput)) ||
-                Number(pageInput) < 1 ||
-                Number(pageInput) > pageCount
-              }
-              onClick={goToPage}
-              type="button"
-            >
-              跳转
             </button>
           </div>
         </div>

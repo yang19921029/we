@@ -24,6 +24,8 @@ type PendingTaskUpdate = {
   nextValue: string
 }
 
+const TASKS_PAGE_SIZE = 20
+
 export function TaskManagementPage({
   onSessionExpired,
   onOpenTask,
@@ -34,6 +36,8 @@ export function TaskManagementPage({
   username: string
 }) {
   const [tasks, setTasks] = useState<AnnotationTask[]>([])
+  const [page, setPage] = useState(1)
+  const [totalTasks, setTotalTasks] = useState(0)
   const [datasets, setDatasets] = useState<DatasetRecord[]>([])
   const [schemas, setSchemas] = useState<LabelSchema[]>([])
   const [membersByProject, setMembersByProject] = useState<Record<number, ProjectMember[]>>({})
@@ -53,12 +57,12 @@ export function TaskManagementPage({
   const [isUpdatingTask, setIsUpdatingTask] = useState(false)
   const [confirmError, setConfirmError] = useState('')
 
-  const loadPageData = useCallback(async () => {
+  const loadPageData = useCallback(async (requestedPage = page) => {
     setIsLoading(true)
     setError('')
     try {
-      const [nextTasks, nextDatasets, nextSchemas] = await Promise.all([
-        getAnnotationTasks(),
+      const [nextTaskPage, nextDatasets, nextSchemas] = await Promise.all([
+        getAnnotationTasks(undefined, requestedPage, TASKS_PAGE_SIZE),
         getDatasets(),
         getLabelSchemas(),
       ])
@@ -69,7 +73,8 @@ export function TaskManagementPage({
       const nextMembersByProject = Object.fromEntries(
         projectIds.map((id, index) => [id, memberLists[index]]),
       )
-      setTasks(nextTasks)
+      setTasks(nextTaskPage.items)
+      setTotalTasks(nextTaskPage.total)
       setDatasets(nextDatasets)
       setSchemas(nextSchemas)
       setMembersByProject(nextMembersByProject)
@@ -87,7 +92,7 @@ export function TaskManagementPage({
     } finally {
       setIsLoading(false)
     }
-  }, [onSessionExpired])
+  }, [onSessionExpired, page])
   const selectedDataset = datasets.find((dataset) => String(dataset.id) === datasetId)
   const assigneeMembers = selectedDataset
     ? membersByProject[selectedDataset.project_id] ?? []
@@ -96,6 +101,7 @@ export function TaskManagementPage({
   useEffect(() => {
     void loadPageData()
   }, [loadPageData])
+  const pageCount = Math.max(1, Math.ceil(totalTasks / TASKS_PAGE_SIZE))
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -131,7 +137,11 @@ export function TaskManagementPage({
       setDeadline('')
       setIsCreateOpen(false)
       setStatus('标注任务已创建。')
-      await loadPageData()
+      if (page === 1) {
+        await loadPageData(1)
+      } else {
+        setPage(1)
+      }
     } catch (cause) {
       setError(handlePageError(cause, onSessionExpired, '任务创建失败。'))
     } finally {
@@ -219,7 +229,7 @@ export function TaskManagementPage({
         <div className="section-title-row">
           <div>
             <h2>任务列表</h2>
-            <p>{tasks.length} 个任务</p>
+            <p>{totalTasks} 个任务</p>
           </div>
           <div className="platform-page-actions">
             <button className="platform-secondary-button" onClick={() => void loadPageData()} type="button">刷新</button>
@@ -317,6 +327,27 @@ export function TaskManagementPage({
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+        {!isLoading && totalTasks > TASKS_PAGE_SIZE && (
+          <div className="data-pagination">
+            <span>第 {page} / {pageCount} 页</span>
+            <div>
+              <button
+                disabled={page <= 1}
+                onClick={() => setPage((current) => current - 1)}
+                type="button"
+              >
+                上一页
+              </button>
+              <button
+                disabled={page >= pageCount}
+                onClick={() => setPage((current) => current + 1)}
+                type="button"
+              >
+                下一页
+              </button>
+            </div>
           </div>
         )}
       </section>

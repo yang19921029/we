@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ApiError,
   getDataItems,
@@ -46,15 +46,36 @@ export function useDataItems(
   taskId?: number,
   searchText = '',
   sortBy: 'newest' | 'uncertain' = 'newest',
+  after?: string,
+  pitId?: string,
 ) {
   const [items, setItems] = useState<DataItem[]>([])
   const [total, setTotal] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const [responsePitId, setResponsePitId] = useState<string | null>(null)
+  const [responsePage, setResponsePage] = useState<number | null>(null)
+  const [responseKey, setResponseKey] = useState('')
   const [loadAttempt, setLoadAttempt] = useState(0)
+  const pitIdRef = useRef(pitId)
+  pitIdRef.current = pitId
+  const requestKey = JSON.stringify([
+    page,
+    pageSize,
+    labelStatus,
+    datasetId,
+    taskId,
+    searchText,
+    sortBy,
+    after,
+    loadAttempt,
+  ])
 
   useEffect(() => {
     const controller = new AbortController()
+    setIsLoading(true)
+    setError('')
     void getDataItems(
       page,
       pageSize,
@@ -64,10 +85,16 @@ export function useDataItems(
       searchText,
       sortBy,
       taskId,
+      after,
+      pitIdRef.current,
     )
       .then((result) => {
         setItems(result.items)
         setTotal(result.total)
+        setNextCursor(result.next_cursor)
+        setResponsePitId(result.pit_id)
+        setResponsePage(result.page)
+        setResponseKey(requestKey)
       })
       .catch((cause: unknown) => {
         if (controller.signal.aborted) return
@@ -81,7 +108,7 @@ export function useDataItems(
         if (!controller.signal.aborted) setIsLoading(false)
       })
     return () => controller.abort()
-  }, [datasetId, labelStatus, loadAttempt, onSessionExpired, page, pageSize, searchText, sortBy, taskId])
+  }, [after, datasetId, labelStatus, loadAttempt, onSessionExpired, page, pageSize, requestKey, searchText, sortBy, taskId])
 
   const saveLabel = useCallback(async (
     itemId: string,
@@ -129,5 +156,17 @@ export function useDataItems(
     setLoadAttempt((attempt) => attempt + 1)
   }
 
-  return { items, total, isLoading, error, retry, saveLabel }
+  return {
+    items,
+    total,
+    isLoading,
+    error,
+    retry,
+    saveLabel,
+    nextCursor,
+    pitId: responsePitId,
+    responsePage,
+    requestKey,
+    responseKey,
+  }
 }

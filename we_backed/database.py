@@ -246,6 +246,7 @@ def init_db(get_db) -> None:
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                     ON UPDATE CURRENT_TIMESTAMP,
                 INDEX idx_tasks_status_assignee (status, assignee),
+                INDEX idx_tasks_created_id (created_at, id),
                 CONSTRAINT fk_tasks_dataset FOREIGN KEY (dataset_id)
                     REFERENCES datasets(id),
                 CONSTRAINT fk_tasks_label_schema FOREIGN KEY (label_schema_id)
@@ -262,12 +263,31 @@ def init_db(get_db) -> None:
                 status VARCHAR(32) NOT NULL DEFAULT '待标注',
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (task_id, item_id),
+                INDEX idx_task_items_task_status (task_id, status),
                 INDEX idx_task_items_assignee_status (assignee, status),
                 CONSTRAINT fk_task_items_task FOREIGN KEY (task_id)
                     REFERENCES annotation_tasks(id) ON DELETE CASCADE
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
             """
         )
+        cursor.execute("SHOW INDEX FROM annotation_tasks")
+        task_indexes = {row["Key_name"] for row in cursor.fetchall()}
+        if "idx_tasks_created_id" not in task_indexes:
+            cursor.execute(
+                """
+                ALTER TABLE annotation_tasks
+                ADD INDEX idx_tasks_created_id (created_at, id)
+                """
+            )
+        cursor.execute("SHOW INDEX FROM task_items")
+        task_item_indexes = {row["Key_name"] for row in cursor.fetchall()}
+        if "idx_task_items_task_status" not in task_item_indexes:
+            cursor.execute(
+                """
+                ALTER TABLE task_items
+                ADD INDEX idx_task_items_task_status (task_id, status)
+                """
+            )
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS audit_logs (

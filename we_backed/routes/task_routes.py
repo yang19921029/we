@@ -25,6 +25,21 @@ def register_task_routes(app):
     @app.get("/api/tasks")
     @login_required
     def list_tasks():
+        paginated = "page" in request.args or "page_size" in request.args
+        if paginated:
+            try:
+                page = int(request.args.get("page", "1"))
+                page_size = int(request.args.get("page_size", "20"))
+            except ValueError:
+                return jsonify(
+                    code=400, message="page 和 page_size 必须是整数。", data=None
+                ), 400
+            if page < 1 or not 1 <= page_size <= 100:
+                return jsonify(
+                    code=400,
+                    message="page 必须大于 0，page_size 必须在 1 到 100 之间。",
+                    data=None,
+                ), 400
         with app_module.get_db().cursor() as cursor:
             where_clauses = []
             params = []
@@ -44,29 +59,76 @@ def register_task_routes(app):
             where_clause = (
                 f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             )
-            cursor.execute(
-                f"""
-                SELECT t.id, t.name, t.dataset_id, d.name AS dataset_name,
-                    d.project_id, p.name AS project_name,
-                    t.label_schema_id, s.name AS label_schema_name,
-                    t.assignee, t.priority, t.status, t.deadline,
-                    t.instructions, t.created_by, t.created_at,
-                    COUNT(i.item_id) AS total_items,
-                    SUM(CASE WHEN i.status = '已标注' THEN 1 ELSE 0 END) AS labeled_items
-                FROM annotation_tasks t
-                JOIN datasets d ON d.id = t.dataset_id
-                JOIN projects p ON p.id = d.project_id
-                JOIN label_schemas s ON s.id = t.label_schema_id
-                LEFT JOIN task_items i ON i.task_id = t.id
-                {where_clause}
-                GROUP BY t.id, t.name, t.dataset_id, d.name, d.project_id, p.name,
-                    t.label_schema_id, s.name, t.assignee, t.priority, t.status,
-                    t.deadline, t.instructions, t.created_by, t.created_at
-                ORDER BY t.created_at DESC, t.id DESC
-                """,
-                tuple(params),
-            )
+            if paginated:
+                cursor.execute(
+                    f"""
+                    SELECT COUNT(*) AS total
+                    FROM annotation_tasks t
+                    JOIN datasets d ON d.id = t.dataset_id
+                    {where_clause}
+                    """,
+                    tuple(params),
+                )
+                total = cursor.fetchone()["total"]
+                cursor.execute(
+                    f"""
+                    SELECT t.id, t.name, t.dataset_id, d.name AS dataset_name,
+                        d.project_id, p.name AS project_name,
+                        t.label_schema_id, s.name AS label_schema_name,
+                        t.assignee, t.priority, t.status, t.deadline,
+                        t.instructions, t.created_by, t.created_at,
+                        (SELECT COUNT(*) FROM task_items i WHERE i.task_id = t.id)
+                            AS total_items,
+                        (SELECT COUNT(*) FROM task_items i
+                         WHERE i.task_id = t.id AND i.status = '已标注')
+                            AS labeled_items
+                    FROM annotation_tasks t
+                    JOIN datasets d ON d.id = t.dataset_id
+                    JOIN projects p ON p.id = d.project_id
+                    JOIN label_schemas s ON s.id = t.label_schema_id
+                    {where_clause}
+                    ORDER BY t.created_at DESC, t.id DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (*params, page_size, (page - 1) * page_size),
+                )
+            else:
+                cursor.execute(
+                    f"""
+                    SELECT t.id, t.name, t.dataset_id, d.name AS dataset_name,
+                        d.project_id, p.name AS project_name,
+                        t.label_schema_id, s.name AS label_schema_name,
+                        t.assignee, t.priority, t.status, t.deadline,
+                        t.instructions, t.created_by, t.created_at,
+                        COUNT(i.item_id) AS total_items,
+                        SUM(CASE WHEN i.status = '已标注' THEN 1 ELSE 0 END)
+                            AS labeled_items
+                    FROM annotation_tasks t
+                    JOIN datasets d ON d.id = t.dataset_id
+                    JOIN projects p ON p.id = d.project_id
+                    JOIN label_schemas s ON s.id = t.label_schema_id
+                    LEFT JOIN task_items i ON i.task_id = t.id
+                    {where_clause}
+                    GROUP BY t.id, t.name, t.dataset_id, d.name, d.project_id,
+                        p.name, t.label_schema_id, s.name, t.assignee, t.priority,
+                        t.status, t.deadline, t.instructions, t.created_by,
+                        t.created_at
+                    ORDER BY t.created_at DESC, t.id DESC
+                    """,
+                    tuple(params),
+                )
             rows = cursor.fetchall()
+        if paginated:
+            return jsonify(
+                code=0,
+                message="ok",
+                data={
+                    "items": [dict(row) for row in rows],
+                    "total": total,
+                    "page": page,
+                    "page_size": page_size,
+                },
+            )
         return jsonify(code=0, message="ok", data=[dict(row) for row in rows])
 
     @app.post("/api/tasks")
