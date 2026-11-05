@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   ApiError,
   getDataItems,
@@ -58,8 +58,6 @@ export function useDataItems(
   const [responsePage, setResponsePage] = useState<number | null>(null)
   const [responseKey, setResponseKey] = useState('')
   const [loadAttempt, setLoadAttempt] = useState(0)
-  const pitIdRef = useRef(pitId)
-  pitIdRef.current = pitId
   const requestKey = JSON.stringify([
     page,
     pageSize,
@@ -69,6 +67,7 @@ export function useDataItems(
     searchText,
     sortBy,
     after,
+    pitId,
     loadAttempt,
   ])
 
@@ -86,7 +85,7 @@ export function useDataItems(
       sortBy,
       taskId,
       after,
-      pitIdRef.current,
+      pitId,
     )
       .then((result) => {
         setItems(result.items)
@@ -108,7 +107,7 @@ export function useDataItems(
         if (!controller.signal.aborted) setIsLoading(false)
       })
     return () => controller.abort()
-  }, [after, datasetId, labelStatus, loadAttempt, onSessionExpired, page, pageSize, requestKey, searchText, sortBy, taskId])
+  }, [after, datasetId, labelStatus, loadAttempt, onSessionExpired, page, pageSize, pitId, requestKey, searchText, sortBy, taskId])
 
   const saveLabel = useCallback(async (
     itemId: string,

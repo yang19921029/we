@@ -4,6 +4,8 @@ import {
   getDatasets,
   getProjects,
   importDatasetFile,
+  previewDatasetFile,
+  type DatasetImportPreview,
   type DatasetRecord,
   type ProjectRecord,
 } from '../../api'
@@ -24,6 +26,7 @@ export function DatasetManagementPage({
   const [projectId, setProjectId] = useState('')
   const [datasetId, setDatasetId] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  const [importPreview, setImportPreview] = useState<DatasetImportPreview | null>(null)
   const [error, setError] = useState('')
   const [status, setStatus] = useState('')
   const [isLoading, setIsLoading] = useState(true)
@@ -78,7 +81,7 @@ export function DatasetManagementPage({
 
   async function handleImport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!datasetId || !file) return
+    if (!datasetId || !file || !importPreview) return
     setIsSaving(true)
     setError('')
     setStatus('')
@@ -86,10 +89,26 @@ export function DatasetManagementPage({
       const result = await importDatasetFile(Number(datasetId), file)
       setStatus(`成功导入 ${result.imported_count} 条记录。`)
       setFile(null)
+      setImportPreview(null)
       setDialog(null)
       await loadDatasets()
     } catch (cause) {
       setError(handlePageError(cause, onSessionExpired, '数据导入失败。'))
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  async function handlePreflight() {
+    if (!datasetId || !file) return
+    setIsSaving(true)
+    setError('')
+    setStatus('')
+    setImportPreview(null)
+    try {
+      setImportPreview(await previewDatasetFile(Number(datasetId), file))
+    } catch (cause) {
+      setError(handlePageError(cause, onSessionExpired, '文件预检失败。'))
     } finally {
       setIsSaving(false)
     }
@@ -219,7 +238,10 @@ export function DatasetManagementPage({
             <label>
               目标数据集
               <select
-                onChange={(event) => setDatasetId(event.target.value)}
+                onChange={(event) => {
+                  setDatasetId(event.target.value)
+                  setImportPreview(null)
+                }}
                 required
                 value={datasetId}
               >
@@ -235,18 +257,46 @@ export function DatasetManagementPage({
               文件（CSV / JSON / JSONL，最大 1 GB）
               <input
                 accept=".csv,.json,.jsonl,.ndjson"
-                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                onChange={(event) => {
+                  setFile(event.target.files?.[0] ?? null)
+                  setImportPreview(null)
+                }}
                 required
                 type="file"
               />
             </label>
             <p className="platform-form-hint">
-              JSON 支持对象数组或包含 items 数组的对象；记录条数不限，每条记录最大 50 MB。大文件上传需要服务端及代理预留足够临时磁盘空间。
+              JSON 支持对象数组、包含 items 数组的对象或单个对象；每条记录必须为对象且最大 50 MB。先执行文件预检，确认记录数量、字段和样例后再导入。大文件预检需要上传完整文件。
             </p>
+            {importPreview && (
+              <section className="platform-table-card" aria-label="文件预检结果">
+                <h3>文件预检通过</h3>
+                <p>检测到 {importPreview.record_count.toLocaleString()} 条记录。</p>
+                <p>字段：{importPreview.fields.join('、') || '无'}</p>
+                <p>以下为前 {importPreview.preview.length} 条样例：</p>
+                <pre className="platform-import-preview">
+                  {JSON.stringify(importPreview.preview, null, 2)}
+                </pre>
+              </section>
+            )}
             {error && <p className="platform-error" role="alert">{error}</p>}
-            <button className="welcome-action" disabled={!file || isSaving} type="submit">
-              {isSaving ? '处理中…' : '开始导入'}
-            </button>
+            {!importPreview ? (
+              <button
+                className="welcome-action"
+                disabled={!file || isSaving || !datasetId}
+                onClick={(event) => {
+                  event.preventDefault()
+                  void handlePreflight()
+                }}
+                type="button"
+              >
+                {isSaving ? '正在预检…' : '预检文件'}
+              </button>
+            ) : (
+              <button className="welcome-action" disabled={isSaving} type="submit">
+                {isSaving ? '正在导入…' : '确认并导入'}
+              </button>
+            )}
           </form>
         </PlatformModal>
       )}

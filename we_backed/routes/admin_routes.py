@@ -18,6 +18,7 @@ from pymysql.err import IntegrityError
 from app import (
     accessible_dataset_ids,
     can_access_data_source,
+    can_access_dataset,
     elastic_error_response,
     get_data_item,
     is_global_project_admin,
@@ -419,6 +420,25 @@ def register_admin_routes(app):
         status = request.args.get("status", "pending")
         if status not in {"pending", "approved", "returned"}:
             return jsonify(code=400, message="审核状态无效。", data=None), 400
+        try:
+            page = int(request.args.get("page", "1"))
+            page_size = int(request.args.get("page_size", "20"))
+        except ValueError:
+            return jsonify(
+                code=400, message="page 和 page_size 必须是整数。", data=None
+            ), 400
+        if page < 1 or not 1 <= page_size <= 100:
+            return jsonify(
+                code=400,
+                message="page 必须大于 0，page_size 必须在 1 到 100 之间。",
+                data=None,
+            ), 400
+        if page * page_size > 50000:
+            return jsonify(
+                code=400,
+                message="审核列表最多支持读取前 50000 条记录，请缩小筛选范围。",
+                data=None,
+            ), 400
         review_filter = (
             {
                 "bool": {
@@ -436,13 +456,64 @@ def register_admin_routes(app):
         dataset_filter = scoped_dataset_filter(accessible_dataset_ids())
         if dataset_filter:
             filters.append(dataset_filter)
+        dataset_id_raw = request.args.get("dataset_id")
+        if dataset_id_raw:
+            try:
+                dataset_id = int(dataset_id_raw)
+            except ValueError:
+                return jsonify(
+                    code=400, message="dataset_id 必须是正整数。", data=None
+                ), 400
+            if dataset_id < 1 or not can_access_dataset(dataset_id):
+                return jsonify(code=403, message="无权查看该数据集审核记录。", data=None), 403
+            if dataset_id == 1:
+                filters.append(
+                    {
+                        "bool": {
+                            "should": [
+                                {"term": {"dataset_id": 1}},
+                                {"bool": {"must_not": [{"exists": {"field": "dataset_id"}}]}},
+                            ],
+                            "minimum_should_match": 1,
+                        }
+                    }
+                )
+            else:
+                filters.append({"term": {"dataset_id": dataset_id}})
+        annotator = request.args.get("annotator", "").strip()
+        if len(annotator) > 191:
+            return jsonify(code=400, message="标注人筛选值过长。", data=None), 400
+        if annotator:
+            filters.append({"term": {"labeled_by.keyword": annotator}})
+        date_from = request.args.get("date_from")
+        date_to = request.args.get("date_to")
+        date_range = {}
+        for field, value, key in (
+            ("date_from", date_from, "gte"),
+            ("date_to", date_to, "lte"),
+        ):
+            if value:
+                try:
+                    datetime.strptime(value, "%Y-%m-%d")
+                except ValueError:
+                    return jsonify(
+                        code=400, message=f"{field} 必须使用 YYYY-MM-DD 格式。", data=None
+                    ), 400
+                date_range[key] = f"{value}T00:00:00" if key == "gte" else f"{value}T23:59:59"
+        if date_range:
+            filters.append({"range": {"labeled_at": date_range}})
+        if date_from and date_to and date_from > date_to:
+            return jsonify(
+                code=400, message="date_from 不能晚于 date_to。", data=None
+            ), 400
         try:
             response = app_module.get_es_client().search(
                 index=current_app.config["ELASTICSEARCH_INDEX"],
                 query={"bool": {"filter": filters}},
-                from_=0,
-                size=100,
+                from_=(page - 1) * page_size,
+                size=page_size,
                 track_total_hits=True,
+                sort=[{"labeled_at": {"order": "desc", "missing": "_last"}}],
             )
         except (ApiError, TransportError, RuntimeError, ValueError) as error:
             return elastic_error_response(error)
@@ -456,6 +527,8 @@ def register_admin_routes(app):
             data={
                 "items": [get_data_item(hit) for hit in hits["hits"]],
                 "total": total,
+                "page": page,
+                "page_size": page_size,
             },
         )
 
@@ -481,8 +554,15 @@ def register_admin_routes(app):
                 index=current_app.config["ELASTICSEARCH_INDEX"],
                 id=item_id,
             )
-            if not can_access_data_source(document.get("_source") or {}):
+            source = document.get("_source") or {}
+            if not can_access_data_source(source):
                 return jsonify(code=403, message="无权审核该项目的数据。", data=None), 403
+            if source.get("review_status") in {"approved", "returned"}:
+                return jsonify(
+                    code=409,
+                    message="该记录已经审核，重新标注后才能再次审核。",
+                    data=None,
+                ), 409
             client.update(
                 index=current_app.config["ELASTICSEARCH_INDEX"],
                 id=item_id,
@@ -518,6 +598,44 @@ def register_admin_routes(app):
             return elastic_error_response(error)
         except (ApiError, TransportError, RuntimeError, ValueError) as error:
             return elastic_error_response(error)
+        db = app_module.get_db()
+        with db.cursor() as cursor:
+            cursor.execute(
+                "SELECT task_id FROM task_items WHERE item_id = %s",
+                (item_id,),
+            )
+            task_ids = [row["task_id"] for row in cursor.fetchall()]
+            if task_ids:
+                item_status = "已审核" if decision == "approved" else "已退回"
+                cursor.execute(
+                    "UPDATE task_items SET status = %s WHERE item_id = %s",
+                    (item_status, item_id),
+                )
+                if decision == "returned":
+                    cursor.executemany(
+                        "UPDATE annotation_tasks SET status = '已退回' WHERE id = %s",
+                        [(task_id,) for task_id in task_ids],
+                    )
+                else:
+                    for task_id in task_ids:
+                        cursor.execute(
+                            """
+                            SELECT COUNT(*) AS remaining
+                            FROM task_items
+                            WHERE task_id = %s
+                                AND status NOT IN ('已审核', '已跳过')
+                            """,
+                            (task_id,),
+                        )
+                        if cursor.fetchone()["remaining"] == 0:
+                            cursor.execute(
+                                """
+                                UPDATE annotation_tasks SET status = '已完成'
+                                WHERE id = %s
+                                """,
+                                (task_id,),
+                            )
+        db.commit()
         return jsonify(
             code=0,
             message="审核结果已保存。",

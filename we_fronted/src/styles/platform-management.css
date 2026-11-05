@@ -370,6 +370,19 @@
   margin-top: 16px;
 }
 
+.platform-import-preview {
+  max-height: 260px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid #e7edf4;
+  border-radius: 5px;
+  background: #f7f9fc;
+  color: #53677e;
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .platform-review-list {
   display: grid;
   gap: 14px;

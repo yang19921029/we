@@ -80,7 +80,8 @@ def register_task_routes(app):
                         (SELECT COUNT(*) FROM task_items i WHERE i.task_id = t.id)
                             AS total_items,
                         (SELECT COUNT(*) FROM task_items i
-                         WHERE i.task_id = t.id AND i.status = '已标注')
+                         WHERE i.task_id = t.id
+                            AND i.status IN ('已标注', '已审核'))
                             AS labeled_items
                     FROM annotation_tasks t
                     JOIN datasets d ON d.id = t.dataset_id
@@ -101,7 +102,8 @@ def register_task_routes(app):
                         t.assignee, t.priority, t.status, t.deadline,
                         t.instructions, t.created_by, t.created_at,
                         COUNT(i.item_id) AS total_items,
-                        SUM(CASE WHEN i.status = '已标注' THEN 1 ELSE 0 END)
+                        SUM(CASE WHEN i.status IN ('已标注', '已审核')
+                            THEN 1 ELSE 0 END)
                             AS labeled_items
                     FROM annotation_tasks t
                     JOIN datasets d ON d.id = t.dataset_id
@@ -243,7 +245,7 @@ def register_task_routes(app):
                 INSERT INTO annotation_tasks
                     (name, dataset_id, label_schema_id, assignee, priority,
                      status, deadline, instructions, created_by)
-                VALUES (%s, %s, %s, %s, %s, '待分配', %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, '待标注', %s, %s, %s)
                 """,
                 (
                     name.strip(),
@@ -279,7 +281,7 @@ def register_task_routes(app):
                 "label_schema_id": schema_id,
                 "assignee": assignee.strip(),
                 "priority": priority,
-                "status": "待分配",
+                "status": "待标注",
             },
         ), 201
 
@@ -295,7 +297,7 @@ def register_task_routes(app):
         with app_module.get_db().cursor() as cursor:
             cursor.execute(
                 """
-                SELECT d.project_id FROM annotation_tasks t
+                SELECT t.status, d.project_id FROM annotation_tasks t
                 JOIN datasets d ON d.id = t.dataset_id WHERE t.id = %s
                 """,
                 (task_id,),
@@ -326,15 +328,28 @@ def register_task_routes(app):
         if "status" in payload:
             status = payload["status"]
             if not isinstance(status, str) or status not in {
-                "待分配",
-                "待标注",
-                "标注中",
-                "待审核",
-                "已完成",
-                "已退回",
-                "已暂停",
+                "待分配", "待标注", "标注中", "待审核", "已完成", "已退回", "已暂停",
             }:
                 return jsonify(code=400, message="任务状态无效。", data=None), 400
+            current_status = task_scope["status"]
+            allowed_transitions = {
+                "待分配": {"待标注", "已暂停"},
+                "待标注": {"标注中", "已暂停"},
+                "标注中": {"待标注", "已暂停"},
+                "已退回": {"标注中", "已暂停"},
+                "已暂停": {"待标注", "标注中", "已退回"},
+                "待审核": set(),
+                "已完成": set(),
+            }
+            if (
+                status != current_status
+                and status not in allowed_transitions.get(current_status, set())
+            ):
+                return jsonify(
+                    code=409,
+                    message="该任务状态由标注或审核流程自动管理，不能直接修改。",
+                    data=None,
+                ), 409
             updates.append("status = %s")
             values.append(status)
         if not updates:
@@ -447,8 +462,10 @@ def register_task_routes(app):
                 return jsonify(code=403, message="无权访问该项目任务。", data=None), 403
             if task_item["assignee"] != session["username"]:
                 return jsonify(code=403, message="当前任务数据未分配给你。", data=None), 403
-            if task_item["task_status"] == "已暂停":
-                return jsonify(code=409, message="任务已暂停，不能跳过数据。", data=None), 409
+            if task_item["task_status"] in {"待审核", "已完成", "已暂停"}:
+                return jsonify(
+                    code=409, message="当前任务状态不允许跳过数据。", data=None
+                ), 409
             cursor.execute(
                 """
                 UPDATE task_items SET status = '已跳过'
@@ -460,15 +477,29 @@ def register_task_routes(app):
                 """
                 SELECT COUNT(*) AS remaining
                 FROM task_items
-                WHERE task_id = %s AND status NOT IN ('已标注', '已跳过')
+                WHERE task_id = %s
+                    AND status NOT IN ('已标注', '已审核', '已跳过')
                 """,
                 (task_id,),
             )
             remaining = cursor.fetchone()["remaining"]
             if remaining == 0:
                 cursor.execute(
-                    "UPDATE annotation_tasks SET status = '待审核' WHERE id = %s",
+                    """
+                    SELECT COUNT(*) AS awaiting_review
+                    FROM task_items
+                    WHERE task_id = %s AND status = '已标注'
+                    """,
                     (task_id,),
+                )
+                next_status = (
+                    "待审核"
+                    if cursor.fetchone()["awaiting_review"]
+                    else "已完成"
+                )
+                cursor.execute(
+                    "UPDATE annotation_tasks SET status = %s WHERE id = %s",
+                    (next_status, task_id),
                 )
         write_audit_log("跳过数据", "标注任务", task_id, {"item_id": item_id})
         db.commit()

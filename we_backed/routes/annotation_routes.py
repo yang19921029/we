@@ -137,7 +137,7 @@ def register_annotation_routes(app):
                 schema = cursor.fetchone()
             if task_item["assignee"] != session["username"]:
                 return jsonify(code=403, message="当前任务未分配给你。", data=None), 403
-            if task["status"] in {"已完成", "已暂停"}:
+            if task["status"] in {"待审核", "已完成", "已暂停"}:
                 return jsonify(code=409, message="当前任务状态不允许继续标注。", data=None), 409
             if schema is not None:
                 allowed_labels = {
@@ -200,6 +200,10 @@ def register_annotation_routes(app):
                             ctx._source.annotation = params.entry.annotation;
                         }
                         if (label_changed) {
+                            ctx._source.remove('review_status');
+                            ctx._source.remove('reviewed_by');
+                            ctx._source.remove('reviewed_at');
+                            ctx._source.remove('review_note');
                             if (params.entry.label == null) {
                                 ctx._source.remove('label');
                                 ctx._source.remove('labeled_by');
@@ -243,12 +247,28 @@ def register_annotation_routes(app):
                     """
                     SELECT COUNT(*) AS remaining
                     FROM task_items
-                    WHERE task_id = %s AND status NOT IN ('已标注', '已跳过')
+                    WHERE task_id = %s
+                        AND status NOT IN ('已标注', '已审核', '已跳过')
                     """,
                     (task_id,),
                 )
                 remaining = cursor.fetchone()["remaining"]
-                next_status = "待审核" if remaining == 0 else "标注中"
+                if remaining == 0:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) AS awaiting_review
+                        FROM task_items
+                        WHERE task_id = %s AND status = '已标注'
+                        """,
+                        (task_id,),
+                    )
+                    next_status = (
+                        "待审核"
+                        if cursor.fetchone()["awaiting_review"]
+                        else "已完成"
+                    )
+                else:
+                    next_status = "标注中"
                 cursor.execute(
                     "UPDATE annotation_tasks SET status = %s WHERE id = %s",
                     (next_status, task_id),

@@ -11,6 +11,7 @@ from werkzeug.security import generate_password_hash
 from app import create_app, request_ai_preannotation
 from routes.project_routes import (
     DatasetImportError,
+    _inspect_dataset_import_records,
     _iter_dataset_import_records,
     _validate_dataset_import_records,
 )
@@ -240,6 +241,46 @@ class FakeCursor:
                 self.result = None
         elif "UPDATE annotation_tasks SET assignee" in query:
             self.result = None
+        elif "UPDATE annotation_tasks SET status = %s WHERE id = %s" in query:
+            status, task_id = params
+            for task in self.database.tasks:
+                if task.get("id") == task_id:
+                    task["status"] = status
+            self.rowcount = 1
+            self.result = None
+        elif "UPDATE annotation_tasks SET status = '已完成'" in query:
+            task_id = params[0]
+            for task in self.database.tasks:
+                if task.get("id") == task_id:
+                    task["status"] = "已完成"
+            self.result = None
+        elif "SELECT t.status, d.project_id FROM annotation_tasks" in query:
+            task_id = params[0]
+            self.result = next(
+                (dict(task) for task in self.database.tasks if task.get("id") == task_id),
+                None,
+            )
+        elif "SELECT task_id FROM task_items WHERE item_id" in query:
+            self.result = [
+                {"task_id": item["task_id"]}
+                for item in self.database.task_items
+                if item["item_id"] == params[0]
+            ]
+        elif "UPDATE task_items SET status = %s WHERE item_id = %s" in query:
+            status, item_id = params
+            for item in self.database.task_items:
+                if item["item_id"] == item_id:
+                    item["status"] = status
+            self.result = None
+        elif "SELECT COUNT(*) AS remaining" in query and "task_items" in query:
+            task_id = params[0]
+            self.result = {
+                "remaining": sum(
+                    item["task_id"] == task_id
+                    and item["status"] not in {"已审核", "已跳过"}
+                    for item in self.database.task_items
+                )
+            }
         elif "UPDATE task_items SET assignee" in query:
             self.result = None
         elif "UPDATE datasets SET record_count = record_count +" in query:
@@ -470,6 +511,7 @@ class FakeDatabase:
         self.member_project_ids = set()
         self.member_relations = set()
         self.tasks = []
+        self.task_items = []
         self.dataset_projects = {1: 1, 2: 2}
         self.users = {
             7: {
@@ -571,6 +613,7 @@ class FakeElastic:
         self.bulk_requests = []
         self.pit_counter = 0
         self.search_requests = []
+        self.review_search_requests = []
 
     def open_point_in_time(self, *, index, keep_alive):
         self.pit_counter += 1
@@ -590,6 +633,14 @@ class FakeElastic:
         pit=None,
         search_after=None,
     ):
+        self.review_search_requests.append(
+            {
+                "query": query,
+                "from_": from_,
+                "size": size,
+                "sort": sort,
+            }
+        )
         self.search_requests.append(
             {
                 "index": index,
@@ -740,6 +791,22 @@ class FakeElastic:
             self.items[id]["updated_at"] = entry["labeled_at"]
         elif "report" in params:
             self.items[id].setdefault("issue_reports", []).append(params["report"])
+        elif "decision" in params:
+            entry = {
+                "decision": params["decision"],
+                "reviewer": params["reviewer"],
+                "note": params["note"],
+                "reviewed_at": params["reviewed_at"],
+            }
+            self.items[id].setdefault("review_history", []).append(entry)
+            self.items[id].update(
+                {
+                    "review_status": params["decision"],
+                    "reviewed_by": params["reviewer"],
+                    "review_note": params["note"],
+                    "reviewed_at": params["reviewed_at"],
+                }
+            )
 
     def index(self, *, index, id, document, refresh):
         self.items[id] = document
@@ -749,11 +816,16 @@ class FakeElastic:
         self.bulk_requests.append((operations.copy(), refresh))
         results = []
         for action, document in zip(operations[::2], operations[1::2]):
-            metadata = action["index"]
+            operation, metadata = next(iter(action.items()))
             item_id = metadata["_id"]
+            if operation == "create" and item_id in self.items:
+                results.append(
+                    {"create": {"_id": item_id, "status": 409, "error": {}}}
+                )
+                continue
             self.items[item_id] = document
             self.indexed_documents.append(item_id)
-            results.append({"index": {"_id": item_id, "status": 201}})
+            results.append({operation: {"_id": item_id, "status": 201}})
         return {"errors": False, "items": results}
 
     @staticmethod
@@ -878,6 +950,66 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(len(self.elastic.bulk_requests), 1)
         self.assertFalse(self.elastic.bulk_requests[0][1])
         self.assertEqual(self.elastic.indices.refresh_calls, ["data_items"])
+        repeated = self.client.post(
+            "/api/datasets/2/import",
+            data={
+                "file": (
+                    BytesIO(b'{"id":1}\n{"id":2}\n'),
+                    "records.jsonl",
+                )
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.json["data"]["imported_count"], 0)
+        self.assertEqual(repeated.json["data"]["skipped_duplicate_count"], 2)
+        self.assertEqual(len(self.elastic.indexed_documents), 2)
+
+    def test_dataset_import_preflight_returns_schema_and_sample_without_indexing(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        response = self.client.post(
+            "/api/datasets/2/import",
+            data={
+                "file": (
+                    BytesIO(b'{"id":1,"text":"first"}\n{"id":2,"text":"second"}\n'),
+                    "records.jsonl",
+                ),
+                "preview_only": "true",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["data"]["record_count"], 2)
+        self.assertEqual(response.json["data"]["fields"], ["id", "text"])
+        self.assertEqual(len(response.json["data"]["preview"]), 2)
+        self.assertEqual(self.elastic.bulk_requests, [])
+        self.assertEqual(self.elastic.indexed_documents, [])
+
+    def test_dataset_import_retry_uses_stable_ids_for_rows_without_source_id(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        content = b"id,text\n1,first\n"
+        first = self.client.post(
+            "/api/datasets/2/import",
+            data={"file": (BytesIO(content), "records.csv")},
+            content_type="multipart/form-data",
+        )
+        second = self.client.post(
+            "/api/datasets/2/import",
+            data={"file": (BytesIO(content), "records.csv")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json["data"]["imported_count"], 1)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json["data"]["imported_count"], 0)
+        self.assertEqual(second.json["data"]["skipped_duplicate_count"], 1)
+        self.assertEqual(len(self.elastic.indexed_documents), 1)
 
     def test_dataset_import_endpoint_accepts_more_than_5000_records(self):
         self.client.post(
@@ -1781,6 +1913,69 @@ class ApiTestCase(unittest.TestCase):
 
         invalid_page = self.client.get("/api/tasks?page=0")
         self.assertEqual(invalid_page.status_code, 400)
+
+    def test_task_status_transitions_are_guarded_by_workflow(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        self.database.tasks = [
+            {"id": 8, "status": "待审核", "project_id": 1},
+            {"id": 9, "status": "待标注", "project_id": 1},
+        ]
+        blocked = self.client.patch("/api/tasks/8", json={"status": "已完成"})
+        self.assertEqual(blocked.status_code, 409)
+
+        paused = self.client.patch("/api/tasks/9", json={"status": "已暂停"})
+        self.assertEqual(paused.status_code, 200)
+        self.assertEqual(self.database.tasks[1]["status"], "已暂停")
+
+    def test_review_approval_completes_the_task_when_all_items_are_reviewed(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        self.database.tasks = [{"id": 3, "status": "待审核", "project_id": 1}]
+        self.database.task_items = [
+            {"task_id": 3, "item_id": "doc-2", "status": "已标注"}
+        ]
+        response = self.client.put(
+            "/api/data-items/doc-2/review",
+            json={"decision": "approved"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.database.task_items[0]["status"], "已审核")
+        self.assertEqual(self.database.tasks[0]["status"], "已完成")
+
+    def test_review_list_filters_and_paginates(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        response = self.client.get(
+            "/api/reviews?status=approved&page=2&page_size=5"
+            "&dataset_id=1&annotator=tester&date_from=2026-10-01"
+            "&date_to=2026-10-31"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["data"]["page"], 2)
+        self.assertEqual(response.json["data"]["page_size"], 5)
+        search = self.elastic.review_search_requests[-1]
+        self.assertEqual(search["from_"], 5)
+        self.assertEqual(search["size"], 5)
+        filters = search["query"]["bool"]["filter"]
+        self.assertIn({"term": {"labeled_by.keyword": "tester"}}, filters)
+        self.assertIn(
+            {
+                "range": {
+                    "labeled_at": {
+                        "gte": "2026-10-01T00:00:00",
+                        "lte": "2026-10-31T23:59:59",
+                    }
+                }
+            },
+            filters,
+        )
 
     def test_data_list_filters_by_label_status(self):
         self.client.post(

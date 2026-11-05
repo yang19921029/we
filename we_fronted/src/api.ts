@@ -156,6 +156,15 @@ export type PlatformStatistics = {
 export type ReviewItem = {
   items: DataItem[]
   total: number
+  page: number
+  page_size: number
+}
+
+export type DatasetImportPreview = {
+  dataset_id: number
+  record_count: number
+  fields: string[]
+  preview: Array<Record<string, unknown>>
 }
 
 export type QualityCheckResult = {
@@ -413,6 +422,16 @@ export function importDatasetFile(
   return request(`/datasets/${datasetId}/import`, { method: 'POST', body })
 }
 
+export function previewDatasetFile(
+  datasetId: number,
+  file: File,
+): Promise<DatasetImportPreview> {
+  const body = new FormData()
+  body.set('file', file)
+  body.set('preview_only', 'true')
+  return request(`/datasets/${datasetId}/import`, { method: 'POST', body })
+}
+
 export function getLabelSchemas(
   signal?: AbortSignal,
 ): Promise<LabelSchema[]> {
@@ -531,9 +550,25 @@ export function getPlatformStatistics(
 
 export function getReviewItems(
   status: 'pending' | 'approved' | 'returned',
+  options: {
+    page?: number
+    pageSize?: number
+    datasetId?: number
+    annotator?: string
+    dateFrom?: string
+    dateTo?: string
+  } = {},
   signal?: AbortSignal,
 ): Promise<ReviewItem> {
-  const query = new URLSearchParams({ status })
+  const query = new URLSearchParams({
+    status,
+    page: String(options.page ?? 1),
+    page_size: String(options.pageSize ?? 20),
+  })
+  if (options.datasetId !== undefined) query.set('dataset_id', String(options.datasetId))
+  if (options.annotator) query.set('annotator', options.annotator)
+  if (options.dateFrom) query.set('date_from', options.dateFrom)
+  if (options.dateTo) query.set('date_to', options.dateTo)
   return request(`/reviews?${query}`, { signal })
 }
 

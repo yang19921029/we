@@ -64,7 +64,7 @@ SMTP_TIMEOUT=10
 
 AI 预标注默认关闭。启用 DeepSeek 前，在**后端**安全配置 `AI_ENABLED=true` 和 `AI_API_KEY`，不要把密钥写入前端、代码库或聊天。服务使用 OpenAI-compatible `POST /chat/completions`、`deepseek-chat` 和 JSON 输出；仅发送当前任务记录的文本（最多 12000 字符），默认先对手机号/邮箱/身份证号脱敏。用户点击“采用建议”前，模型结果只作为建议返回，不会自动写入标注。启用后该文本会发送至 `AI_BASE_URL` 指定的服务；当前 DeepSeek URL 是托管的外部服务，请按组织的数据处理/留存政策配置。仅 HTTPS 可连接外部地址；HTTP 只允许本机回环服务。
 
-数据响应默认启用敏感信息脱敏（手机号、邮箱、身份证号），可通过 `MASK_SENSITIVE_DATA=false` 关闭。仅 CSV、JSON 和 JSONL/NDJSON 文件可导入，每文件最多 1 GB（1024 MB），记录条数不限；单条记录最多 50 MB。导入先进行流式校验，再按最多 100 条或约 5 MB 分批写入 Elasticsearch，所有批次完成后统一刷新索引；单条超大记录会单独成批。后端临时磁盘及反向代理必须允许并容纳 1 GB 上传请求；若部署在 Nginx 等代理之后，应相应提高请求体上限和超时。单个任务最多分配 10000 条记录。导出使用 Elasticsearch 滚动分页，不限制匹配记录总数。导入的 Elastic 文档会写入 `dataset_id`，旧数据归入默认数据集。任务创建时会将数据 ID 快照写入 `task_items`，后续标注仅允许处理被分配到当前任务的记录。
+数据响应默认启用敏感信息脱敏（手机号、邮箱、身份证号），可通过 `MASK_SENSITIVE_DATA=false` 关闭。仅 CSV、JSON 和 JSONL/NDJSON 文件可导入，每文件最多 1 GB（1024 MB），记录条数不限；单条记录最多 50 MB。导入接口支持 multipart 字段 `preview_only=true` 执行全文件预检并返回字段、记录总数和最多 10 条样例，不写入数据；确认后重新上传并导入。正式导入先进行流式校验，再按最多 100 条或约 5 MB 分批写入 Elasticsearch，所有批次完成后统一刷新索引；单条超大记录会单独成批。后端临时磁盘及反向代理必须允许并容纳 1 GB 上传请求；若部署在 Nginx 等代理之后，应相应提高请求体上限和超时。单个任务最多分配 10000 条记录。导出使用 Elasticsearch 滚动分页，不限制匹配记录总数。导入的 Elastic 文档会写入 `dataset_id`，旧数据归入默认数据集。任务创建时会将数据 ID 快照写入 `task_items`，后续标注仅允许处理被分配到当前任务的记录。
 
 `init-db` 会创建默认组织、默认项目、“情感分类”标签体系及默认数据集。组织 → 项目 → 数据集 → 任务构成项目层级；旧数据集迁移到默认项目。标签体系支持 2 至 100 个唯一编码/名称和颜色配置；每次更新都会写入版本历史。账号角色包括“超级管理员、项目管理员、任务负责人、标注员、审核员、数据分析员”；后端按角色返回菜单，首页快捷入口也只显示该角色可访问的菜单项；用户管理和审核/统计/导出等敏感接口仍由后端校验角色。自动任务分配会选择当前活动任务量较低的标注员。统计从 Elastic 聚合实时计算，并从 MySQL 汇总截止时间已过且未完成/未暂停的任务作为逾期 SLA 指标；成本指标尚未启用，等待项目计费规则。审核结果、标注历史和多模态标注与文档一起保存在 Elastic，配置变更写入 MySQL 审计日志。
 
@@ -115,6 +115,7 @@ AI 预标注默认关闭。启用 DeepSeek 前，在**后端**安全配置 `AI_E
 - `POST /api/data-items/<id>/issues`：提交数据异常反馈
 - `GET /api/data-items/<id>/quality-check`：执行基础质量规则和当前数据集内的重复内容检查
 - `GET /api/reviews?status=pending|approved|returned`、`PUT /api/data-items/<id>/review`：审核已标注数据
+- 审核列表支持 `page`、`page_size`、`dataset_id`、`annotator`、`date_from`、`date_to` 筛选；默认每页 20 条，最多 100 条
 - `GET /api/data-items/export?format=jsonl|csv`：通过 Elasticsearch 滚动分页导出筛选后的全部数据
 
 标注请求示例：
@@ -132,9 +133,9 @@ AI 预标注默认关闭。启用 DeepSeek 前，在**后端**安全配置 `AI_E
 - `GET/POST /api/organizations`、`GET/POST /api/projects`：管理组织和项目
 - `GET /api/projects/<id>/members`、`POST /api/projects/<id>/members`、`DELETE /api/projects/<id>/members/<user_id>`：查看或管理项目成员（管理接口仅限全局管理员）
 - `GET/POST /api/datasets`：列出或创建数据集
-- `POST /api/datasets/<id>/import`：以 multipart 字段 `file` 导入 CSV、JSON、JSONL/NDJSON
+- `POST /api/datasets/<id>/import`：以 multipart 字段 `file` 导入 CSV、JSON、JSONL/NDJSON；可先传 `preview_only=true` 预检
 - `GET/POST /api/tasks`：列出或创建任务（数据集、标签体系、负责人、优先级、截止时间和说明）。带 `page`、`page_size` 时返回分页对象；分页默认每页 20 条、最多 100 条。任务分页仅聚合当前页任务的数据量和已标注量；不带分页参数的请求仍返回完整任务数组，供标注任务选择器使用。
-- `PATCH /api/tasks/<id>`、`POST /api/tasks/<id>/auto-assign`：更新任务状态/负责人或按当前工作量自动分配
+- `PATCH /api/tasks/<id>`、`POST /api/tasks/<id>/auto-assign`：更新任务状态/负责人或按当前工作量自动分配；创建任务进入待标注，标注完成进入待审核，审核退回会回到标注流程，全部审核通过后自动完成，待审核和已完成状态不可手动设置
 - `POST /api/tasks/<id>/items/<item_id>/skip`：跳过已分配数据
 - `GET/POST /api/label-schemas`、`PUT /api/label-schemas/<id>`：管理标签体系和版本
 - `GET /api/label-schemas/<id>/versions`：查看标签变更历史

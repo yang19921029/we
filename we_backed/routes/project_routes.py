@@ -113,7 +113,12 @@ def _iter_dataset_import_records(uploaded_file, filename):
 
 
 def _validate_dataset_import_records(uploaded_file, filename):
+    return _inspect_dataset_import_records(uploaded_file, filename)["record_count"]
+
+
+def _inspect_dataset_import_records(uploaded_file, filename, sample_limit=10):
     record_count = 0
+    preview_records = []
     for record in _iter_dataset_import_records(uploaded_file, filename):
         if not isinstance(record, dict):
             raise DatasetImportError("文件中的每条记录都必须是 JSON 对象。")
@@ -121,9 +126,22 @@ def _validate_dataset_import_records(uploaded_file, filename):
         if record_size > MAX_IMPORT_RECORD_BYTES:
             raise DatasetImportError("单条记录不能超过 50 MB。", 413)
         record_count += 1
+        if len(preview_records) < sample_limit:
+            preview_records.append(record)
     if record_count == 0:
         raise DatasetImportError("文件必须包含至少 1 条 JSON 对象记录。")
-    return record_count
+    fields = list(
+        dict.fromkeys(
+            field
+            for record in preview_records
+            for field in record
+        )
+    )
+    return {
+        "record_count": record_count,
+        "fields": fields,
+        "preview": preview_records,
+    }
 
 
 def register_project_routes(app):
@@ -479,6 +497,22 @@ def register_project_routes(app):
                     message="单个导入文件不能超过 1 GB（1024 MB）。",
                     data=None,
                 ), 413
+            preview_only = request.form.get("preview_only", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if preview_only:
+                preview = _inspect_dataset_import_records(uploaded_file, filename)
+                return jsonify(
+                    code=0,
+                    message="文件预检通过。",
+                    data={
+                        "dataset_id": dataset_id,
+                        **preview,
+                    },
+                )
             _validate_dataset_import_records(uploaded_file, filename)
         except UnicodeDecodeError:
             return jsonify(code=400, message="文件必须使用 UTF-8 编码。", data=None), 400
@@ -510,9 +544,10 @@ def register_project_routes(app):
                 client = app_module.get_es_client()
                 operations = []
                 batch_bytes = 0
+                record_number = 0
 
                 def write_batch():
-                    nonlocal indexed, failed_records, batch_bytes
+                    nonlocal indexed, failed_records, skipped_duplicates, batch_bytes
                     if not operations:
                         return
                     result = client.bulk(
@@ -520,9 +555,12 @@ def register_project_routes(app):
                         refresh=False,
                     )
                     for item in result.get("items", []):
-                        operation_result = item.get("index", {})
-                        if 200 <= operation_result.get("status", 0) < 300:
+                        operation_result = next(iter(item.values()), {})
+                        status_code = operation_result.get("status", 0)
+                        if 200 <= status_code < 300:
                             indexed += 1
+                        elif status_code == 409:
+                            skipped_duplicates += 1
                         else:
                             failed_records += 1
                     if len(result.get("items", [])) != len(operations) // 2:
@@ -533,13 +571,29 @@ def register_project_routes(app):
                     batch_bytes = 0
 
                 for record in _iter_dataset_import_records(uploaded_file, filename):
+                    record_number += 1
                     external_id = record.get("_id", record.get("source_id"))
                     item_id = (
                         f"ds-{dataset_id}-{external_id}"
                         if isinstance(external_id, (str, int))
                         and str(external_id).strip()
                         and len(str(external_id)) <= 200
-                        else uuid.uuid4().hex
+                        else "ds-{}-{}".format(
+                            dataset_id,
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                "{}:{}:{}".format(
+                                    dataset_id,
+                                    record_number,
+                                    json.dumps(
+                                        record,
+                                        ensure_ascii=False,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ),
+                                ),
+                            ).hex,
+                        )
                     )
                     inserted = dedupe_db.execute(
                         "INSERT OR IGNORE INTO imported_ids (id) VALUES (?)",
@@ -555,7 +609,7 @@ def register_project_routes(app):
                         "inserted_at", datetime.now(timezone.utc).isoformat()
                     )
                     action = {
-                        "index": {
+                        "create": {
                             "_index": current_app.config["ELASTICSEARCH_INDEX"],
                             "_id": item_id,
                         }
@@ -612,7 +666,7 @@ def register_project_routes(app):
                     message=(
                         f"导入中断：已确认写入 {indexed} 条，"
                         f"失败 {failed_records} 条。数据集计数已更新，"
-                        "请检查后重试。"
+                        "修复数据后可重新上传同一文件；已成功写入的记录会识别为重复项。"
                     ),
                     data={
                         "dataset_id": dataset_id,
@@ -630,7 +684,8 @@ def register_project_routes(app):
                 code=503,
                 message=(
                     f"导入部分失败：成功 {indexed} 条，失败 {failed_records} 条。"
-                    "数据集计数已按成功写入数更新，请检查错误记录后重试。"
+                    "数据集计数已按成功写入数更新；修复数据后重新上传时，"
+                    "已成功写入的记录会识别为重复项。"
                 ),
                 data={
                     "dataset_id": dataset_id,

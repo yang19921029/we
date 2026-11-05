@@ -26,6 +26,15 @@ type PendingTaskUpdate = {
 
 const TASKS_PAGE_SIZE = 20
 
+function getTaskStatusOptions(status: string) {
+  if (status === '已暂停') return ['待标注', '标注中', '已退回']
+  if (status === '已退回') return ['标注中', '已暂停']
+  if (status === '标注中') return ['待标注', '已暂停']
+  if (status === '待分配') return ['待标注', '已暂停']
+  if (status === '待标注') return ['标注中', '已暂停']
+  return [status]
+}
+
 export function TaskManagementPage({
   onSessionExpired,
   onOpenTask,
@@ -305,10 +314,11 @@ export function TaskManagementPage({
                       <select
                         aria-label={`${task.name}状态`}
                         className="platform-task-select platform-task-select-status"
+                        disabled={['待审核', '已完成'].includes(task.status)}
                         onChange={(event) => void changeStatus(task, event.target.value)}
                         value={task.status}
                       >
-                        {['待分配', '待标注', '标注中', '待审核', '已完成', '已退回', '已暂停'].map((value) => (
+                        {getTaskStatusOptions(task.status).map((value) => (
                           <option key={value} value={value}>{value}</option>
                         ))}
                       </select>

@@ -8,7 +8,7 @@ import { PageTitle } from './PlatformShared'
 type ReviewStatus = 'pending' | 'approved' | 'returned'
 type ReviewSummary = Record<ReviewStatus, ReviewItem>
 
-const EMPTY_REVIEW: ReviewItem = { items: [], total: 0 }
+const EMPTY_REVIEW: ReviewItem = { items: [], total: 0, page: 1, page_size: 20 }
 
 const QUALITY_RULES = [
   {
@@ -66,9 +66,9 @@ export function QualityManagementPage({
     setError('')
     try {
       const [pending, approved, returned] = await Promise.all([
-        getReviewItems('pending'),
-        getReviewItems('approved'),
-        getReviewItems('returned'),
+        getReviewItems('pending', { pageSize: 1 }),
+        getReviewItems('approved', { pageSize: 100 }),
+        getReviewItems('returned', { pageSize: 100 }),
       ])
       setSummary({ pending, approved, returned })
     } catch (cause) {

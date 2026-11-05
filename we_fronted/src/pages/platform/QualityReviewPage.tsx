@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  getDatasets,
   getQualityCheck,
   getReviewItems,
   reviewDataItem,
+  type DatasetRecord,
   type ReviewItem,
 } from '../../api'
 import { PageTitle } from './PlatformShared'
@@ -14,7 +16,18 @@ export function QualityReviewPage({
   onSessionExpired: () => void
 }) {
   const [statusFilter, setStatusFilter] = useState<'pending' | 'approved' | 'returned'>('pending')
-  const [result, setResult] = useState<ReviewItem>({ items: [], total: 0 })
+  const [result, setResult] = useState<ReviewItem>({
+    items: [],
+    total: 0,
+    page: 1,
+    page_size: 20,
+  })
+  const [datasets, setDatasets] = useState<DatasetRecord[]>([])
+  const [datasetId, setDatasetId] = useState('')
+  const [annotator, setAnnotator] = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const [page, setPage] = useState(1)
   const [notes, setNotes] = useState<Record<string, string>>({})
   const [qualityChecks, setQualityChecks] = useState<Record<string, string[]>>({})
   const [checkingItem, setCheckingItem] = useState('')
@@ -26,17 +39,32 @@ export function QualityReviewPage({
     setLoading(true)
     setError('')
     try {
-      setResult(await getReviewItems(statusFilter))
+      setResult(await getReviewItems(statusFilter, {
+        page,
+        pageSize: 20,
+        datasetId: datasetId ? Number(datasetId) : undefined,
+        annotator: annotator.trim(),
+        dateFrom,
+        dateTo,
+      }))
     } catch (cause) {
       setError(handlePageError(cause, onSessionExpired, '审核数据加载失败。'))
     } finally {
       setLoading(false)
     }
-  }, [onSessionExpired, statusFilter])
+  }, [annotator, dateFrom, dateTo, datasetId, onSessionExpired, page, statusFilter])
 
   useEffect(() => {
     void loadReviews()
   }, [loadReviews])
+
+  useEffect(() => {
+    void getDatasets()
+      .then(setDatasets)
+      .catch((cause: unknown) => {
+        setError(handlePageError(cause, onSessionExpired, '数据集筛选项加载失败。'))
+      })
+  }, [onSessionExpired])
 
   async function decide(itemId: string, decision: 'approved' | 'returned') {
     setError('')
@@ -82,6 +110,53 @@ export function QualityReviewPage({
           <option value="returned">已退回</option>
         </select>
         <span>{result.total} 条</span>
+      </div>
+      <div className="data-list-toolbar">
+        <label htmlFor="review-dataset">数据集</label>
+        <select
+          id="review-dataset"
+          onChange={(event) => {
+            setDatasetId(event.target.value)
+            setPage(1)
+          }}
+          value={datasetId}
+        >
+          <option value="">全部可访问数据集</option>
+          {datasets.map((dataset) => (
+            <option key={dataset.id} value={dataset.id}>{dataset.name}</option>
+          ))}
+        </select>
+        <label htmlFor="review-annotator">标注人</label>
+        <input
+          id="review-annotator"
+          maxLength={191}
+          onChange={(event) => {
+            setAnnotator(event.target.value)
+            setPage(1)
+          }}
+          placeholder="按账号筛选"
+          value={annotator}
+        />
+        <label htmlFor="review-date-from">标注日期</label>
+        <input
+          id="review-date-from"
+          onChange={(event) => {
+            setDateFrom(event.target.value)
+            setPage(1)
+          }}
+          type="date"
+          value={dateFrom}
+        />
+        <label htmlFor="review-date-to">至</label>
+        <input
+          id="review-date-to"
+          onChange={(event) => {
+            setDateTo(event.target.value)
+            setPage(1)
+          }}
+          type="date"
+          value={dateTo}
+        />
       </div>
       {error && <p className="platform-error" role="alert">{error}</p>}
       {message && <p className="platform-success" role="status">{message}</p>}
@@ -129,6 +204,29 @@ export function QualityReviewPage({
               )}
             </article>
           ))}
+        </div>
+      )}
+      {!loading && result.total > result.page_size && (
+        <div className="data-pagination">
+          <span>
+            第 {result.page} / {Math.ceil(result.total / result.page_size)} 页
+          </span>
+          <div>
+            <button
+              disabled={page <= 1}
+              onClick={() => setPage((current) => current - 1)}
+              type="button"
+            >
+              上一页
+            </button>
+            <button
+              disabled={page >= Math.ceil(result.total / result.page_size)}
+              onClick={() => setPage((current) => current + 1)}
+              type="button"
+            >
+              下一页
+            </button>
+          </div>
         </div>
       )}
     </>
