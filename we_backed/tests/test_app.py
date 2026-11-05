@@ -319,6 +319,41 @@ class FakeCursor:
                 if user and params[1] in self.database.member_project_ids
                 else None
             )
+        elif "COALESCE(SUM(" in query and "active_items" in query:
+            task_id, project_id, excluded_username, excluded_username_again = params
+            candidates = []
+            active_task_ids = {
+                task["id"]
+                for task in self.database.tasks
+                if task.get("status")
+                in {"待分配", "待标注", "标注中", "已退回"}
+            }
+            for user in self.database.users.values():
+                if (
+                    user["role"] != "标注员"
+                    or not user["is_active"]
+                    or project_id not in self.database.member_project_ids
+                    or user["username"] in {excluded_username, excluded_username_again}
+                ):
+                    continue
+                active_items = sum(
+                    item["assignee"] == user["username"]
+                    and item["status"] in {"待标注", "已退回"}
+                    and item["task_id"] != task_id
+                    and item["task_id"] in active_task_ids
+                    for item in self.database.task_items
+                )
+                candidates.append(
+                    {"username": user["username"], "active_items": active_items}
+                )
+            self.result = (
+                min(candidates, key=lambda candidate: (
+                    candidate["active_items"],
+                    candidate["username"],
+                ))
+                if candidates
+                else None
+            )
         elif "FROM users" in query:
             if "COUNT(*) AS total" in query:
                 self.result = {
@@ -496,6 +531,32 @@ class FakeCursor:
                 if task and task_item
                 else None
             )
+        elif "SELECT i.assignee, i.second_assignee," in query:
+            task_id, item_id = params
+            task_item = next(
+                (
+                    item
+                    for item in self.database.task_items
+                    if item["task_id"] == task_id and item["item_id"] == item_id
+                ),
+                None,
+            )
+            task = next(
+                (task for task in self.database.tasks if task.get("id") == task_id),
+                None,
+            )
+            self.result = (
+                {
+                    "assignee": task_item["assignee"],
+                    "second_assignee": task_item.get("second_assignee"),
+                    "task_status": task["status"],
+                    "project_id": self.database.dataset_projects.get(
+                        task.get("dataset_id", 1), 1
+                    ),
+                }
+                if task_item and task
+                else None
+            )
         elif "SELECT t.assignee, t.second_assignee, d.project_id" in query:
             task_id = params[0]
             task = next(
@@ -542,6 +603,13 @@ class FakeCursor:
             for task in self.database.tasks:
                 if task.get("assignee") == old_assignee:
                     task["assignee"] = assignee
+            self.result = None
+        elif "SET assignee = %s, status = '待标注'" in query:
+            assignee, task_id = params
+            for task in self.database.tasks:
+                if task.get("id") == task_id:
+                    task["assignee"] = assignee
+                    task["status"] = "待标注"
             self.result = None
         elif "UPDATE annotation_tasks SET assignee" in query:
             assignee, task_id = params
@@ -1792,6 +1860,96 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.json)
         self.assertEqual([task["assignee"] for task in self.database.tasks], ["tester", "tester"])
         self.assertEqual(len(self.database.notifications), 2)
+
+    def test_double_annotation_reassignment_rejects_duplicate_assignees(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        self.database.member_project_ids.add(1)
+        self.database.tasks = [
+            {
+                "id": 31,
+                "name": "双人任务",
+                "dataset_id": 1,
+                "assignee": "old-annotator",
+                "second_assignee": "tester",
+                "status": "待标注",
+            }
+        ]
+        self.database.task_items = [
+            {
+                "task_id": 31,
+                "item_id": "doc-1",
+                "assignee": "old-annotator",
+                "second_assignee": "tester",
+                "status": "待标注",
+            }
+        ]
+
+        single = self.client.patch(
+            "/api/tasks/31",
+            json={"assignee": "tester"},
+        )
+        batch = self.client.post(
+            "/api/tasks/batch-assign",
+            json={"task_ids": [31], "assignee": "tester"},
+        )
+
+        self.assertEqual(single.status_code, 400)
+        self.assertEqual(batch.status_code, 400)
+        self.assertEqual(self.database.tasks[0]["assignee"], "old-annotator")
+        self.assertEqual(self.database.task_items[0]["assignee"], "old-annotator")
+
+    def test_auto_assignment_excludes_second_annotator(self):
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+        for user_id, username in ((8, "first-annotator"), (9, "second-annotator")):
+            self.database.users[user_id] = {
+                "id": user_id,
+                "username": username,
+                "password_hash": generate_password_hash("correct-password"),
+                "role": "标注员",
+                "is_active": 1,
+                "email": None,
+                "email_verified_at": None,
+                "auth_version": 0,
+            }
+        self.database.member_project_ids.add(1)
+        self.database.tasks = [
+            {
+                "id": 31,
+                "name": "双人任务",
+                "dataset_id": 1,
+                "assignee": "old-annotator",
+                "second_assignee": "first-annotator",
+                "status": "待分配",
+            }
+        ]
+        self.database.task_items = [
+            {
+                "task_id": 31,
+                "item_id": "doc-1",
+                "assignee": "old-annotator",
+                "second_assignee": "first-annotator",
+                "status": "待标注",
+            }
+        ]
+
+        response = self.client.post("/api/tasks/31/auto-assign")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.json["data"]["assignee"], "second-annotator")
+        self.assertNotEqual(
+            self.database.tasks[0]["assignee"],
+            self.database.tasks[0]["second_assignee"],
+        )
+        self.assertEqual(
+            self.database.task_items[0]["assignee"],
+            self.database.tasks[0]["assignee"],
+        )
 
     def test_login_rejects_invalid_password(self):
         response = self.client.post(
@@ -3095,6 +3253,58 @@ class ApiTestCase(unittest.TestCase):
             "renamed-annotator",
         )
 
+    def test_double_annotation_rejects_skip_and_multimodal_submissions(self):
+        self.database.users[8] = {
+            "id": 8,
+            "username": "second-annotator",
+            "password_hash": generate_password_hash("correct-password"),
+            "role": "标注员",
+            "is_active": 1,
+            "email": None,
+            "email_verified_at": None,
+            "auth_version": 0,
+        }
+        self.database.member_project_ids.add(1)
+        self.database.tasks.append(
+            {
+                "id": 9,
+                "name": "双人复核任务",
+                "dataset_id": 1,
+                "label_schema_id": 1,
+                "assignee": "tester",
+                "second_assignee": "second-annotator",
+                "status": "待标注",
+            }
+        )
+        self.database.task_items.append(
+            {
+                "task_id": 9,
+                "item_id": "doc-1",
+                "assignee": "tester",
+                "second_assignee": "second-annotator",
+                "status": "待标注",
+            }
+        )
+        self.client.post(
+            "/api/login",
+            json={"username": "tester", "password": "correct-password"},
+        )
+
+        skipped = self.client.post("/api/tasks/9/items/doc-1/skip")
+        multimodal = self.client.put(
+            "/api/data-items/doc-1/label",
+            json={
+                "label": "正向",
+                "task_id": 9,
+                "annotation": {"items": []},
+            },
+        )
+
+        self.assertEqual(skipped.status_code, 409)
+        self.assertEqual(multimodal.status_code, 400)
+        self.assertEqual(self.database.task_items[0]["status"], "待标注")
+        self.assertEqual(self.database.task_item_annotations, [])
+
     def test_double_annotation_conflict_requires_reviewer_adjudication(self):
         self.database.users[8] = {
             "id": 8,
@@ -3196,6 +3406,12 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertEqual(second_label.json["data"]["status"], "待仲裁")
         self.assertEqual(self.database.task_items[0]["status"], "待仲裁")
+        duplicate_submission = self.client.put(
+            "/api/data-items/doc-1/label",
+            json={"label": "负向", "task_id": 9},
+        )
+        self.assertEqual(duplicate_submission.status_code, 409)
+        self.assertEqual(len(self.database.task_item_annotations), 2)
 
         self.client.post("/api/logout", json={})
         self.client.post(
